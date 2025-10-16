@@ -1,0 +1,35 @@
+* [33mf6dcd4d6a[m[33m ([m[1;32mmaster[m[33m)[m Initialized backend commit
+* [33m4e2035001[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mbackend[m[33m, [m[1;31morigin/main[m[33m, [m[1;31morigin/backend[m[33m)[m updated resume-parser module
+* [33m8a4411548[m updated server call to ai router
+* [33m505aa07c0[m Update calls to backend from the resume parsing/analyzer page
+* [33m31d33ecad[m Update read-pdf.ts to import pdf-worker
+* [33m825ccd7d7[m reroute gemini calls
+* [33m2da3a2da7[m Update ImageViewer.tsx
+* [33m14a684c44[m Updated backend startup
+* [33madb07ee1d[m Update tsconfig.json
+* [33ma17e5a838[m Added port 5000 to CSP
+* [33mb96607322[m Update tsconfig.node.json
+* [33md7e6b17be[m Update noemit flag
+* [33m9633c25bf[m New dependencies & modified dev command
+* [33mc75b142f9[m Migrated NER and GEMINI servers using Axios
+* [33md3bd67759[m Create testing request
+* [33mfe6ace52b[m Update tsconfig.app.json
+* [33mccac49bf5[m Create CNAME
+* [33ma33365982[m changes
+* [33m71d6c540b[m test
+* [33meb7bfecb2[m test
+* [33ma99709851[m testing
+* [33m4a9a41a30[m Delete .VSCodeCounter/2025-08-27_08-40-17 directory
+* [33m3fa47c2f5[m Update README.md
+* [33mdcc78fd2e[m Readme update
+* [33m62111b35f[m Removed unecessary files
+* [33mcbd1c37e1[m EmployeeInfo Attendance Update
+* [33ma75d9eb44[m Remove deocument
+* [33mf0a94885a[m Change
+* [33m575827a81[m 
+* [33m95c9d2e29[m Delete src/app.zip
+* [33m44ebfa345[m Ignore and logfile
+* [33m7d1cf1127[m backend libraries
+* [33mb3c15104c[m Mock Data
+* [33mb9a2f69c5[m Initial Commit
+* [33md750cb2af[m Initial commit

@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.sqlite3
+
+
+# Virtual Environments
+venv/
+.env/
+.env.bak/
+env/
+
+
+# IDEs
+.vscode/
+.idea/
+*.iml
+
+
+# OS
+.DS_Store
+Thumbs.db
+
+
+
+#others
+VISION_CREDS.json
