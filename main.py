@@ -5,6 +5,7 @@ from api import routes_ocr, routes_ai, routes_debug, routes_parser
 from doctr.models import ocr_predictor
 from transformers import pipeline
 import uvicorn as uv
+import os
 
 
 # Load models once and store in app state
@@ -53,4 +54,5 @@ def root():
     return {"message": "Backend is running"}
 
 if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
     uv.run("main:app", host="127.0.0.1", port=8000, reload=True)
