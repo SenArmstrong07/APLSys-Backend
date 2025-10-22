@@ -12,7 +12,14 @@ import os
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("Loading OCR model...")
-    app.state.ocr_model = ocr_predictor(det_arch="db_resnet34", reco_arch="crnn_vgg16_bn", pretrained=True)
+    app.state.ocr_model = ocr_predictor(
+        det_arch="db_resnet50", #Fastest detection model
+        reco_arch="vitstr_base", #Most accurate recognition model
+        pretrained=True,
+        assume_straight_pages=False,  # Better for receipts
+        straighten_pages=True,        # Automatically straighten skewed images
+        detect_orientation=True       # Detect and correct orientation
+    )
 
     print("Loading NER models...")
     # For Resume Parsing

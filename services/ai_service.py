@@ -1,15 +1,15 @@
 import requests
 import os
+import json
 from dotenv import load_dotenv
 from utils.img_to_b64 import image_to_base64
-
+from utils.openrouter_client import openrouter, OPENROUTER_MODEL, OPENROUTER_API_KEY
 # Load environment variables
 load_dotenv()
 
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 GEMINI_MODEL = "gemini-2.5-pro"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
 
 def gemini_extract_resume_profile(full_text: str) -> dict:
     """
@@ -85,10 +85,10 @@ def gemini_extract_resume_profile(full_text: str) -> dict:
     except Exception:
         return {"error": "Failed to parse Gemini response", "raw": text}
     
-def gemini_extract_metadata_from_text(extracted_text: str) -> dict:
+def deepseek_extract_metadata_from_text(extracted_text: str) -> dict:
     """
-    Use Gemini to extract and label structured metadata from OCR-extracted text,
-    using only the allowed tags from DEFAULT_TAGS.
+    Use OpenRouter / Deepseek (via OpenRouter API) to extract and label structured metadata
+    from OCR-extracted text, using only the allowed tags from DEFAULT_TAGS.
     Returns a JSON object with all detected fields, key-value pairs, and inferred structure.
     """
     allowed_tags = [
@@ -116,42 +116,51 @@ def gemini_extract_metadata_from_text(extracted_text: str) -> dict:
     ]
     tags_str = ", ".join([f'"{tag}"' for tag in allowed_tags])
     prompt = (
-        "You are an expert document parser. Given the following extracted text from a document, "
-        "extract all relevant metadata, key-value pairs, and any structured information you can infer. "
-        "Only use the following tags as keys in your JSON output:\n"
-        f"{tags_str}\n"
-        "Do not invent new keys or use keys outside this list. "
-        "Do not use any other keys (such as ORG, MISC, PER, LOC, etc). "
-        "If a value is not present, use an empty string. "
-        "Return your answer as a flat JSON object with only these allowed tags as keys.\n"
-        f"Extracted Text:\n{extracted_text}\nJSON:"
+        "You are an expert document parser. Given the following extracted text, "
+        "identify and label any matching information using ONLY the allowed tags listed below. "
+        "Return ONLY the tags and values that you actually find in the text - do not include empty fields. "
+        "Return your answer as a minimal JSON object with only the detected fields.\n\n"
+        f"Allowed tags:\n{tags_str}\n\n"
+        f"Extracted Text:\n{extracted_text}\n\n"
+        "Return only a JSON object with the detected fields. Do not include explanations or empty fields."
     )
-    url = f"{BASE_URL}/models/{GEMINI_MODEL}:generateContent"
-    headers = {
-        "Content-Type": "application/json",
-        "x-goog-api-key": GEMINI_API_KEY
-    }
-    payload = {
-        "contents": [
-            {"parts": [{"text": prompt}]}
-        ]
-    }
-    response = requests.post(url, json=payload, headers=headers)
-    response.raise_for_status()
-    data = response.json()
-    text = (
-        data.get("candidates", [{}])[0]
-            .get("content", {})
-            .get("parts", [{}])[0]
-            .get("text", "")
-    )
-    import json
+
+    extra_headers = {}
+    referer = os.getenv("OPENROUTER_REFERER")
+    title = os.getenv("OPENROUTER_TITLE")
+    if referer:
+        extra_headers["HTTP-Referer"] = referer
+    if title:
+        extra_headers["X-Title"] = title
+
+    if not OPENROUTER_API_KEY:
+        return {"error": "OPENROUTER_API_KEY not set in environment"}
+
     try:
+        completion = openrouter.chat.completions.create(
+            extra_headers=extra_headers,
+            extra_body={},
+            model=OPENROUTER_MODEL,
+            messages=[
+                {"role": "system", "content": "You are an expert document parser. Respond only with a JSON object using the allowed tags."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.0,
+            max_tokens=1500,
+        )
+        text = completion.choices[0].message.content
+    except Exception as e:
+        return {"error": f"OpenRouter request failed: {str(e)}"}
+
+    try:
+        if not isinstance(text, str) or not text:
+            return {"error": "Empty or non-text response from model", "raw": text}
         start = text.find('{')
         end = text.rfind('}') + 1
-        metadata_json = json.loads(text[start:end])
-        return metadata_json
+        if start == -1 or end == 0:
+            return {"error": "No JSON object found in model response", "raw": text}
+        return json.loads(text[start:end])
     except Exception:
-        return {"error": "Failed to parse Gemini response", "raw": text}
-    
+        return {"error": "Failed to parse OpenRouter response", "raw": text}
+
 

@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Dict, Any, List
 
 #AI Requests
 class ResumeAnalysisRequest(BaseModel):
@@ -34,6 +34,12 @@ class MapEntitiesRequest(BaseModel):
     
 class TextRequest(BaseModel):
     text: str
+    
+class TaskCreateRequest(BaseModel):
+    task_type: str
+    filename: Optional[str] = None
+    details: Optional[Dict[str, Any]] = None
+    files: Optional[List[str]] = None  # optional, keep for batch metadata
 
 
     

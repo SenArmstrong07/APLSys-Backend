@@ -12,3 +12,5 @@ google-cloud-vision
 python-multipart
 camelot-py
 tabula-py
+opencv-python-headless
+pillow
