@@ -13,5 +13,6 @@ python-multipart
 camelot-py
 tabula-py
 opencv-python-headless
+openai
 pillow
 python-docx
