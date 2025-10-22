@@ -14,3 +14,4 @@ camelot-py
 tabula-py
 opencv-python-headless
 pillow
+python-docx
