@@ -7,7 +7,6 @@ from transformers import pipeline
 import uvicorn as uv
 import os
 
-
 # Load models once and store in app state
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -61,5 +60,5 @@ def root():
     return {"message": "Backend is running"}
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    uv.run("main:app", host="0.0.0.0", port=$PORT, reload=True)
+    port = int(os.environ.get("PORT", 8000))
+    uv.run("main:app", host="0.0.0.0", port=port, reload=True)
