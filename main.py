@@ -1,4 +1,3 @@
-from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from api import routes_ocr, routes_ai, routes_debug, routes_parser
@@ -6,6 +5,15 @@ from doctr.models import ocr_predictor
 from transformers import pipeline
 import uvicorn as uv
 import os
+
+try:
+    import certifi
+    os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
+    os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+except Exception:
+    pass
+from fastapi import FastAPI
+
 
 # Load models once and store in app state
 @asynccontextmanager
@@ -21,10 +29,6 @@ async def lifespan(app: FastAPI):
     )
 
     print("Loading NER models...")
-    # For Resume Parsing
-    #tokenizer_resume = AutoTokenizer.from_pretrained("./model/resume-ner-model")
-    #model_resume = "./model/resume-ner-model"
-    #ner_resume_pipeline = pipeline(task ="token-classification", model=model_resume, aggregation_strategy="simple")
     
     #For General OCR usage
     #tokenizer_general = AutoTokenizer.from_pretrained("dbmdz/bert-large-cased-finetuned-conll03-english")

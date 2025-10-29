@@ -20,7 +20,7 @@ import json
 import os
 from pathlib import Path
 from typing import List, Dict, Any
-from model.request_schema import SearchRequest, TaskCreateRequest
+from model.request_schema import SearchRequest, TaskCreateRequest, TaskCreateBatchRequest
 router = APIRouter()
 
 task_store = TaskStore()
@@ -45,23 +45,52 @@ async def get_ocr_status():
     """
     return get_processing_status()
 
-@router.post("/tasks", status_code=201)
-async def create_task(payload: TaskCreateRequest):
+# New: create tasks endpoint that supports batch creation and returns per-file task ids
+@router.post("/create-task", status_code=201)
+async def create_tasks(body: TaskCreateBatchRequest):
     """
-    Create a new task. Expects JSON body { task_type, filename?, details? }.
-    Returns: {"task_id": int}
+    Create a task or a batch of tasks.
+    For batch_ocr provide `files: ["a.pdf", "b.jpg"]`.
+    Returns:
+      { "task_id": <batch_id>, "file_tasks": { "a.pdf": <id>, ... } }
     """
     try:
-        task_id = task_store.create_task(
-            task_type=payload.task_type,
-            filename=payload.filename,
-            details=payload.details or {}
+        # If a list of files is provided, create a parent batch and child tasks
+        if body.files and len(body.files) > 0:
+            # create batch task
+            batch_id = task_store.create_task(
+                task_type=body.task_type,
+                filename=body.filename,
+                details={"file_count": len(body.files), **(body.details or {})}
+            )
+
+            file_task_map: Dict[str, int] = {}
+            for idx, fname in enumerate(body.files, start=1):
+                file_task_id = task_store.create_task(
+                    task_type="ocr_file" if body.task_type == "batch_ocr" else "subtask",
+                    filename=fname,
+                    details={"batch_id": batch_id, "index": idx}
+                )
+                file_task_map[fname] = file_task_id
+
+            # persist mapping in batch details for easy reconciliation
+            task_store.update_task(batch_id, details={
+                **(body.details or {}),
+                "files": body.files,
+                "file_task_map": file_task_map
+            })
+
+            return {"task_id": batch_id, "file_tasks": file_task_map}
+
+        # Otherwise create a single task
+        single_id = task_store.create_task(
+            task_type=body.task_type,
+            filename=body.filename,
+            details=body.details or {}
         )
-        # optional: immediately set status to pending
-        task_store.update_task(task_id, status="pending", progress=0.0)
-        return {"task_id": task_id}
+        return {"task_id": single_id}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create task: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to create task(s): {str(e)}")
 
 # New endpoints to query tasks
 @router.get("/tasks")
@@ -265,13 +294,14 @@ async def extract_text_full(file: UploadFile, ocrreq: Request):
         task_store.update_task(task_id, status="processing")
         model = ocrreq.app.state.ocr_model
         content = await file.read()
-        result = model(content)
+        # Normalize input (pdf/docx/image bytes) into the DocumentFile/exported dict
+        doc, exported = extract_on_document(content, model)
         task_store.update_task(
             task_id, 
             status="completed",
-            details={"page_count": len(result.get("pages", []))}
+            details={"page_count": len(exported.get("pages", []))}
         )
-        return {"result": result, "task_id": task_id}
+        return {"result": exported, "task_id": task_id}
     except Exception as e:
         task_store.update_task(task_id, status="error", details={"error": str(e)})
         raise
@@ -287,18 +317,23 @@ async def extract_text_region(ocrreq: Request, file: UploadFile = File(...)):
         task_store.update_task(task_id, status="processing")
         model = ocrreq.app.state.ocr_model
         content = await file.read()
-        result = model(content)
         
+        # Normalize bytes/path into exported OCR structure (dict with "pages")
+        doc, result = extract_on_document(content, model)
+
         text = []
         confidences = []
-        for page in result["pages"]:
-            for block in page["blocks"]:
-                for line in block["lines"]:
-                    line_text = " ".join([word["value"] for word in line["words"]])
+        for page in result.get("pages", []):
+            for block in page.get("blocks", []):
+                if not isinstance(block, dict):
+                    continue
+                for line in block.get("lines", []):
+                    line_text = " ".join([word.get("value", "") for word in line.get("words", [])])
                     text.append(line_text)
-                    for word in line["words"]:
+                    for word in line.get("words", []):
                         if "confidence" in word and word["confidence"] is not None:
                             confidences.append(word["confidence"])
+        
         
         avg_conf = float(sum(confidences) / len(confidences)) if confidences else 0.0
         task_store.update_task(
@@ -374,10 +409,22 @@ async def search_results(
             # Extract text from OCR results
             text_content = ""
             for page in script_content["ocr_results"]["pages"]:
-                for block in page.get("blocks", []):
-                    for line in block.get("lines", []):
+                # skip if page is not a dict (guard against malformed input)
+                if not isinstance(page, dict):
+                    continue
+                blocks = page.get("blocks", []) if isinstance(page, dict) else []
+                for block in blocks:
+                    # skip if block is not a dict
+                    if not isinstance(block, dict):
+                        continue
+                    lines = block.get("lines", [])
+                    for line in lines:
+                        # skip if line is not a dict
+                        if not isinstance(line, dict):
+                            continue
+                        words = line.get("words", [])
                         line_text = " ".join(
-                            word["value"] for word in line.get("words", [])
+                            word.get("value", "") for word in words if isinstance(word, dict)
                         )
                         text_content += line_text + " "
             

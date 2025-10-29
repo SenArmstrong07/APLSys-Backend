@@ -11,6 +11,18 @@ BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 GEMINI_MODEL = "gemini-2.5-pro"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
+def validate_resume_text(text: str) -> bool:
+    """Basic validation to check if text looks like a resume"""
+    resume_indicators = [
+        "experience",
+        "education",
+        "skills",
+        "objective",
+        "qualifications"
+    ]
+    text_lower = text.lower()
+    return any(indicator in text_lower for indicator in resume_indicators)
+
 def gemini_extract_resume_profile(full_text: str) -> dict:
     """
     Use Gemini to extract a structured resume profile from raw resume text.

@@ -39,7 +39,12 @@ class TaskCreateRequest(BaseModel):
     task_type: str
     filename: Optional[str] = None
     details: Optional[Dict[str, Any]] = None
-    files: Optional[List[str]] = None  # optional, keep for batch metadata
+    
+class TaskCreateBatchRequest(BaseModel):
+    task_type: str
+    files: Optional[List[str]] = None
+    filename: Optional[str] = None
+    details: Optional[Dict[str, Any]] = None
 
 
     

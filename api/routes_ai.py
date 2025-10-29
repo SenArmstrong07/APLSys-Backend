@@ -11,7 +11,8 @@ import io
 from model.request_schema import ResumeTextRequest, TextRequest
 from services.ai_service import (
     gemini_extract_resume_profile,
-    deepseek_extract_metadata_from_text
+    deepseek_extract_metadata_from_text,
+    validate_resume_text
 )
 from utils.task_store import TaskStore
 from utils.openrouter_client import openrouter, OPENROUTER_API_KEY, OPENROUTER_MODEL
@@ -90,6 +91,9 @@ Job Description:
 @router.post("/gemini-extract-resume-profile")
 async def gemini_extract_resume_profile_endpoint(req: ResumeTextRequest):
     """Extract a structured resume profile using Gemini fallback."""
+    if not validate_resume_text(req.text):
+        return {"error": "Text does not appear to be a resume"}
+    
     task_id = task_store.create_task(
         task_type="gemini_resume_extract",
         details={"text_length": len(req.text)}

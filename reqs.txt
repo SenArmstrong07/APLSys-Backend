@@ -1,5 +1,6 @@
 python-doctr[viz,html,contrib]
 fastapi
+certifi
 uvicorn
 transformers
 torch

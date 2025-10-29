@@ -383,7 +383,9 @@ def extract_on_document(file, model):
             doc = DocumentFile.from_images([file])
             result = model(doc)
             exported = result.export()
-            return doc, exported
+            # Ensure all numpy types are converted to native Python types for JSON serialization
+            np_exported = convert_numpy_types(exported)
+            return doc, np_exported
 
     # If file is a path string
     elif isinstance(file, str):
@@ -410,14 +412,16 @@ def extract_on_document(file, model):
             doc = DocumentFile.from_images(file)
             result = model(doc)
             exported = result.export()
-            return doc, exported
+            np_exported = convert_numpy_types(exported)
+            return doc, np_exported
 
     # Fallback: if unknown type, try to treat as image bytes/path
     try:
         doc = DocumentFile.from_images(file)
         result = model(doc)
         exported = result.export()
-        return doc, exported
+        np_exported = convert_numpy_types(exported)
+        return doc, np_exported
     except Exception as e:
         raise ValueError(f"Unsupported file type or failed to process document: {e}")
 
