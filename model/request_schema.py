@@ -16,14 +16,14 @@ class ClassifyRequest(BaseModel):
 class ResumeTextRequest(BaseModel):
     text: str
     
-#PARSING Requests    
+#PARSING Requests
 class DocumentParseRequest(BaseModel):
     text: str
     
 class ResumeParseRequest(BaseModel):
     text: str
     
-#UTILITY Requests    
+#UTILITY Requests
 class SearchRequest(BaseModel):
     file_path: str
     query: str
@@ -45,8 +45,3 @@ class TaskCreateBatchRequest(BaseModel):
     files: Optional[List[str]] = None
     filename: Optional[str] = None
     details: Optional[Dict[str, Any]] = None
-
-
-    
-
-
