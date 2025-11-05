@@ -1,0 +1,18 @@
+[build]
+builder = "NIXPACKS"
+buildCommand = "pip install -r requirements.txt"
+
+[deploy]
+startCommand = "uvicorn main:app --host 0.0.0.0 --port $PORT"
+
+[packages]
+apt = [
+  "libgl1",
+  "libglib2.0-0",
+  "libjpeg-dev",
+  "zlib1g",
+  "ghostscript",
+  "libxml2",
+  "libxslt1.1",
+  "openjdk-11-jre"
+]
