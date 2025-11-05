@@ -34,9 +34,19 @@ async def lifespan(app: FastAPI):
     #tokenizer_general = AutoTokenizer.from_pretrained("dbmdz/bert-large-cased-finetuned-conll03-english")
     model_general = "dbmdz/bert-large-cased-finetuned-conll03-english"
     general_ner_pipeline = pipeline(task = "token-classification", model=model_general, aggregation_strategy="simple")
+    
+    
+    #For Resume Parsing
+    model_basic = "DeezNutz1337/Bert-based-Resume-Profiler_BASIC"
+    profiling_pipeline_basic= pipeline(task = "ner", model=model_basic, aggregation_strategy="simple")
+    
+    model_semantic = "DeezNutz1337/Bert-based-Resume-Profiler_SEMANTIC"
+    profiling_pipeline_semantic= pipeline(task = "ner", model=model_semantic, aggregation_strategy="simple")
 
-    #app.state.ner_resume_pipeline = ner_resume_pipeline
+    app.state.ner_resume_pipeline_basic = profiling_pipeline_basic
+    app.state.ner_resume_pipeline_semantic = profiling_pipeline_semantic
     app.state.general_ner_pipeline = general_ner_pipeline
+    
     print("Models ready!")
     
     yield

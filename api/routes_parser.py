@@ -10,7 +10,7 @@ from services.parsing_service import (
     parse_document_text,
 )
 from utils.task_store import TaskStore
-from model.request_schema import DocumentParseRequest, ResumeParseRequest
+from model.request_schema import DocumentParseRequest, ResumeTextRequest
 from typing import Optional
 
 router = APIRouter()
@@ -194,6 +194,69 @@ async def extract_resume_txt(request: Request, file: UploadFile = File(...)):
             details={"text_length": len(plain_text)}
         )
         return {"text": plain_text, "task_id": task_id}
+    except Exception as e:
+        task_store.update_task(task_id, status="error", details={"error": str(e)})
+        raise
+    
+    
+@router.post("/ner-extract-resume-profile")
+async def ner_extract_resume_profile(req: ResumeTextRequest, request: Request):
+    """
+    Extract a structured resume profile using your fine-tuned NER models.
+    """
+    if not req.text or len(req.text.strip()) < 20:
+        return {"error": "Input text too short or invalid."}
+
+    task_id = task_store.create_task(
+        task_type="ner_resume_extract",
+        details={"text_length": len(req.text)}
+    )
+
+    try:
+        task_store.update_task(task_id, status="processing")
+
+        # Access resume-ner model
+        basic_pipeline = request.app.state.ner_resume_pipeline_basic
+        semantic_pipeline = request.app.state.ner_resume_pipeline_semantic
+
+        # Run both models
+        general_results = basic_pipeline(req.text)
+        semantic_results = semantic_pipeline(req.text)
+
+        # Merge outputs by label
+        def group_entities(results):
+            grouped = {}
+            for ent in results:
+                label = ent.get("entity_group", ent.get("entity", "UNKNOWN"))
+                value = ent["word"]
+                grouped.setdefault(label, []).append(value)
+            return grouped
+
+        general_entities = group_entities(general_results)
+        semantic_entities = group_entities(semantic_results)
+
+        # Combine intelligently — prioritize semantic fields
+        combined = {**general_entities, **semantic_entities}
+
+        # Join duplicates
+        for k in combined:
+            combined[k] = list(set(combined[k]))
+
+        task_store.update_task(
+            task_id,
+            status="completed",
+            details={"entity_types": list(combined.keys())}
+        )
+
+        return {
+            "task_id": task_id,
+            "parsed_entities": combined,
+            "summary": {
+                "entity_count": len(combined),
+                "text_length": len(req.text)
+            }
+        }
+
     except Exception as e:
         task_store.update_task(task_id, status="error", details={"error": str(e)})
         raise
