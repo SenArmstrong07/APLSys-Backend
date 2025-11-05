@@ -247,6 +247,8 @@ async def ner_extract_resume_profile(req: ResumeTextRequest, request: Request):
             status="completed",
             details={"entity_types": list(combined.keys())}
         )
+        
+        print("DEBUG RESULTS:", combined)
 
         return {
             "task_id": task_id,
