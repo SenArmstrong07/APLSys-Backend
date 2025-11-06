@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ghostscript \
     libxml2 \
     libxslt1.1 \
-    openjdk-11-jre \
+    openjdk-17-jre \
     build-essential \
     ca-certificates \
  && rm -rf /var/lib/apt/lists/*
