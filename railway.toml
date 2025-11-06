@@ -1,22 +1,5 @@
 [build]
 builder = "DOCKERFILE"
-buildCommand = "pip install -r requirements.txt"
 
 [deploy]
 startCommand = ""
-
-[nixpacks]
-plan = "python"
-aptPkgs = ["libgl1", "libglib2.0-0", "libjpeg-dev", "zlib1g", "ghostscript", "libxml2", "libxslt1.1", "openjdk-11-jre"]
-
-[packages]
-apt = [
-  "libgl1",
-  "libglib2.0-0",
-  "libjpeg-dev",
-  "zlib1g",
-  "ghostscript",
-  "libxml2",
-  "libxslt1.1",
-  "openjdk-11-jre"
-]

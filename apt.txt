@@ -1,2 +1,11 @@
 libgl1
 libglib2.0-0
+libsm6
+libxext6
+libxrender1
+libjpeg-dev
+zlib1g
+ghostscript
+libxml2
+libxslt1.1
+openjdk-11-jre
