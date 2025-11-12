@@ -1,7 +1,9 @@
-from fastapi import APIRouter, UploadFile, File, Form, Query
+from fastapi import APIRouter, UploadFile, File, Form, Query, HTTPException, Request, status
 from model.request_schema import ClassifyRequest, ResumeAnalysisRequest
 import requests
 import os
+import time
+import threading
 from dotenv import load_dotenv
 from model.request_schema import ResumeAnalysisRequest
 from utils.img_to_b64 import image_to_base64
@@ -42,51 +44,70 @@ async def get_task(task_id: int):
         return {"error": "Task not found"}
 
 def build_prompt(req: ResumeAnalysisRequest) -> str:
+    """
+    Build a concise resume analysis prompt.
+    REQUIREMENTS:
+    - Use exactly '##' (two hashes) for section headers. Do NOT use '###' or other markdown.
+    - For each '##' section provide NO MORE THAN 2 sentences.
+    - Keep lists short: max 3 items unless otherwise noted.
+    - Be concise and focused; avoid extra commentary outside the sections.
+    """
     base_prompt = f"""
-Please use only "##" for section headers and avoid using "###" or Markdown bold/italic formatting in your output.
-IMPORTANT: For each section, provide your analysis in NO MORE THAN 2 sentences. Be concise but informative.
+Use ONLY '##' (two hashes) for section headers. Do NOT use '###', bold, italics, or any other markdown styles.
+For each '##' section provide NO MORE THAN 2 sentences. Keep lists short (max 3 items). Do not add any commentary outside the sections.
 
 ## Overall Assessment
-[In 2 sentences maximum, provide a focused assessment of the resume's quality, effectiveness, and alignment with industry standards.]
+In up to 2 sentences, give a focused assessment of the resume's quality, strengths, and main weaknesses.
 
 ## Skills Analysis
-- **Skill Proficiency**: [In 1-2 sentences, assess the apparent level of expertise in key skills.]
-- **Missing Skills**: [In 1-2 sentences, list crucial missing skills that would improve the resume for their target role.]
+- Skill Proficiency: In 1-2 sentences, summarize the candidate's apparent skill levels.
+- Missing Skills: In 1-2 sentences, list the most critical missing skills (max 3 short phrases).
 
 ## Experience Analysis
-[In 2 sentences maximum, analyze how well they've presented their experience, including action verbs and quantifiable achievements. End with: Resume Score: XX/100.]
+In up to 2 sentences, evaluate how experience is presented (use of action verbs, metrics, relevance). End the section with a single-line score like: "Score: XX/100".
 
 ## Key Strengths
-[In 2 sentences maximum, list 2-3 specific strengths of the resume with brief explanations.]
+List up to 3 concise strengths (each 1 short phrase or sentence).
 
 ## Resume Score
-[Single line format: "Resume Score: XX/100"]
+Single-line: "Resume Score: XX/100"
 
-Resume Data:
-{req.resume}
 """
     if req.job_role:
         base_prompt += f"""
-The candidate is targeting a role as: {req.job_role}
-
 ## Role Alignment Analysis
-[In 2 sentences maximum, analyze how well the resume aligns with the {req.job_role} role and provide key recommendations.]
+In up to 2 sentences, explain how the resume aligns with the role: {req.job_role} and give 1-2 focused recommendations.
 """
-
     if req.job_description:
         base_prompt += f"""
-Additionally, compare this resume to the following job description:
-
-Job Description:
-{req.job_description}
-
 ## Job Match Analysis
-[In 2 sentences maximum, analyze the resume-job match with a percentage and key alignment points.]
+In up to 2 sentences, compare the resume to the job description and provide a job match percentage (0-100).
 
 ## Key Job Requirements Not Met
-[In 2 sentences maximum, list the most critical missing requirements and how to address them.]
+List up to 3 of the most critical missing requirements as short phrases and a 1-line suggestion for addressing them.
 """
+    base_prompt += f"\nResume Text:\n{req.resume}\n"
     return base_prompt
+
+# --- Simple in-memory rate limiter (per-IP) ---
+RATE_LIMIT_LOCK = threading.Lock()
+RATE_LIMIT_STORE = {}  # ip -> [timestamps]
+RATE_LIMIT_MAX = 5     # requests
+RATE_LIMIT_WINDOW = 60  # seconds
+
+def check_rate_limit(client_ip: str):
+    now = time.time()
+    with RATE_LIMIT_LOCK:
+        arr = RATE_LIMIT_STORE.get(client_ip, [])
+        # drop old timestamps
+        arr = [t for t in arr if now - t < RATE_LIMIT_WINDOW]
+        if len(arr) >= RATE_LIMIT_MAX:
+            # store back the cleaned arr (unchanged)
+            RATE_LIMIT_STORE[client_ip] = arr
+            return False, RATE_LIMIT_WINDOW - (now - arr[0])
+        arr.append(now)
+        RATE_LIMIT_STORE[client_ip] = arr
+        return True, None
 
 @router.post("/gemini-extract-resume-profile")
 async def gemini_extract_resume_profile_endpoint(req: ResumeTextRequest):
@@ -185,16 +206,22 @@ async def batch_analyze_resumes(
     return {"results": results, "batch_task_id": batch_task_id}
 
 @router.post("/analyze-resume")
-async def analyze_resume(req: ResumeAnalysisRequest):
+async def analyze_resume(req: ResumeAnalysisRequest, request: Request):
     """
     Analyze resume using OpenRouter / DeepSeek chat completions.
     """
+    client_ip = getattr(request.client, "host", "unknown")
+    allowed, retry_after = check_rate_limit(client_ip)
+    if not allowed:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                            detail=f"Rate limit exceeded. Try again in {int(retry_after or 0)}s.")
     task_id = task_store.create_task(
         task_type="resume_analysis",
         details={
             "text_length": len(req.resume),
             "has_job_role": bool(req.job_role),
-            "has_job_description": bool(req.job_description)
+            "has_job_description": bool(req.job_description),
+            "client_ip": client_ip
         }
     )
 
@@ -219,7 +246,7 @@ async def analyze_resume(req: ResumeAnalysisRequest):
                 {"role": "user", "content": prompt},
             ],
             temperature=0.0,
-            max_tokens=1500,
+            max_tokens=800,
         )
         text = completion.choices[0].message.content
         task_store.update_task(
