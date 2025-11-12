@@ -18,7 +18,7 @@ from services.ai_service import (
     validate_resume_text
 )
 from utils.task_store import TaskStore
-from utils.openrouter_client import openrouter, OPENROUTER_API_KEY, OPENROUTER_MODEL
+from utils.openrouter_client import client, OPENROUTER_API_KEY, OPENROUTER_MODEL
 router = APIRouter()
 task_store = TaskStore()
 load_dotenv()
@@ -260,7 +260,7 @@ async def analyze_resume(req: ResumeAnalysisRequest, request: Request):
 
     try:
         task_store.update_task(task_id, status="processing")
-        completion = openrouter.chat.completions.create(
+        completion = client.chat.completions.create(
             extra_headers=extra_headers,
             extra_body={},
             model=OPENROUTER_MODEL,

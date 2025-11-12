@@ -16,7 +16,7 @@ if not OPENROUTER_API_KEY:
 
 
 # single shared client instance
-openrouter = OpenAI(
+client = OpenAI(
     base_url=OPENROUTER_BASE,
     api_key=OPENROUTER_API_KEY,
 )

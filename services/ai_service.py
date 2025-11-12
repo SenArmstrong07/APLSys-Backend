@@ -3,7 +3,7 @@ import os
 import json
 from dotenv import load_dotenv
 from utils.img_to_b64 import image_to_base64
-from utils.openrouter_client import openrouter, OPENROUTER_MODEL, OPENROUTER_API_KEY
+from utils.openrouter_client import client, OPENROUTER_MODEL, OPENROUTER_API_KEY
 import time
 import re
 
@@ -168,7 +168,7 @@ def deepseek_extract_metadata_from_text(extracted_text: str) -> dict:
         return {"error": "OPENROUTER_API_KEY not set in environment"}
 
     try:
-        completion = openrouter.chat.completions.create(
+        completion = client.chat.completions.create(
             extra_headers=extra_headers,
             extra_body={},
             model=OPENROUTER_MODEL,
@@ -193,7 +193,7 @@ def deepseek_extract_metadata_from_text(extracted_text: str) -> dict:
         t = re.sub(r"\s{2,}", " ", t)           # collapse multiple spaces
         return t.strip()
 
-    cleaned = _clean_model_text(text)
+    cleaned = _clean_model_text(text or " ")
 
     # parse JSON object from cleaned text
     try:
