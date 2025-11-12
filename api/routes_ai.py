@@ -73,6 +73,7 @@ List up to 3 concise strengths (each 1 short phrase or sentence).
 Single-line: "Resume Score: XX/100"
 
 """
+    base_prompt += f"\nResume Text:\n{req.resume}\n"
     if req.job_role:
         base_prompt += f"""
 ## Role Alignment Analysis
@@ -86,7 +87,6 @@ In up to 2 sentences, compare the resume to the job description and provide a jo
 ## Key Job Requirements Not Met
 List up to 3 of the most critical missing requirements as short phrases and a 1-line suggestion for addressing them.
 """
-    base_prompt += f"\nResume Text:\n{req.resume}\n"
     return base_prompt
 
 # --- Simple in-memory rate limiter (per-IP) ---
