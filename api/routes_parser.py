@@ -2,6 +2,7 @@ from fastapi import APIRouter, UploadFile, File, Query, Request
 import pandas as pd
 import os
 from doctr.io import DocumentFile
+import fitz
 from services.parsing_service import (
     extract_tables_from_pdf,
     extract_tables_from_pdf_with_camelot,
@@ -171,22 +172,31 @@ async def extract_resume_txt(request: Request, file: UploadFile = File(...)):
         task_store.update_task(task_id, status="processing")
         print("File received. Waiting for extraction...")
         
-        # Access your DocTR model
-        model = request.app.state.ocr_model
-        # Read uploaded file into bytes
+        # Fast path for born-digital PDFs using PyMuPDF
         file_bytes = await file.read()
-        # Load PDF or image into DocTR
-        doc = DocumentFile.from_pdf(file_bytes)
-        # Run OCR prediction
-        result = model(doc)
-        exported = result.export()
-        
-        plain_text = ""
-        for page in exported["pages"]:
-            for block in page["blocks"]:
-                for line in block["lines"]:
-                    line_text = " ".join(word["value"] for word in line["words"])
-                    plain_text += line_text + " \n"
+        try:
+            print("Trying PyMuPDF for text extraction...")
+            pdf = fitz.open(stream=file_bytes, filetype="pdf")
+            plain_text = []
+            for p in pdf:
+                # 'text' is fastest; use 'blocks' or 'dict' for layout/bboxes
+                plain_text.append(p.get_text("text"))
+            plain_text = "\n".join(plain_text)
+            print("PyMuPDF extraction successful.")
+        except Exception:
+            # Fallback to DocTR for scanned images or corrupt PDFs
+            print("Defaulting to DocTR for text extraction...")
+            model = request.app.state.ocr_model
+            doc = DocumentFile.from_pdf(file_bytes)
+            result = model(doc)
+            exported = result.export()
+            plain_parts = []
+            for page in exported.get("pages", []):
+                for block in page.get("blocks", []):
+                    for line in block.get("lines", []):
+                        plain_parts.append(" ".join(w["value"] for w in line.get("words", [])))
+            plain_text = "\n".join(plain_parts)
+            print("DocTR extraction successful.")
         
         task_store.update_task(
             task_id, 

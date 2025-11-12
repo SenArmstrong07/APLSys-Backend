@@ -4,6 +4,7 @@ from tabula.io import read_pdf
 from docx import Document
 import pandas as pd
 import re
+from typing import Dict, List
 
 def extract_email(text):
     match = re.search(r"\b[\w\.-]+@[\w\.-]+\.\w+\b", text)
@@ -168,7 +169,6 @@ def extract_tables_from_docx_with_camelot(docx_path):
         df = pd.DataFrame(normalized)
         dataframes.append(df)
     return dataframes
-# ...existing code...
 
 def export_tables_to_csv(tables, base_filename="table"):
     """
@@ -189,4 +189,63 @@ def export_tables_to_excel(tables, base_filename="table"):
         filename = f"{base_filename}_{idx+1}.xlsx"
         table.to_excel(filename, index=False)
         print(f"Exported: {filename}")
+
+def clean_and_structure_resume_text(text: str) -> Dict[str, str]:
+    """
+    Clean and structure resume text extracted from PDF.
+    Handles layout noise, normalizes sections, and returns organized dict.
+    """
+    # Normalize newlines and collapse excessive whitespace
+    text = re.sub(r"-\s*\n\s*", "", text)  # join hyphenated line breaks
+    text = "\n".join([ln.strip() for ln in text.splitlines() if ln.strip()])
     
+    # Common resume section headers (case-insensitive)
+    section_patterns = {
+        "contact": r"(?:contact|phone|email|address|location)",
+        "about": r"(?:about|objective|summary|profile)",
+        "education": r"(?:education|academic|schooling|degree)",
+        "experience": r"(?:experience|work|employment|professional)",
+        "skills": r"(?:skills|technical|competencies|expertise)",
+        "projects": r"(?:projects|portfolio|work samples)",
+        "certifications": r"(?:certifications?|licenses?|achievements?)",
+        "languages": r"(?:languages?|linguistic)",
+    }
+    
+    structured = {section: "" for section in section_patterns.keys()}
+    structured["other"] = ""
+    
+    current_section = "other"
+    lines = text.split("\n")
+    
+    for line in lines:
+        line_lower = line.lower().strip()
+        
+        # Check if line is a section header
+        matched = False
+        for section, pattern in section_patterns.items():
+            if re.search(pattern, line_lower) and len(line) < 50:  # likely a header
+                current_section = section
+                matched = True
+                break
+        
+        if not matched:
+            # Add line to current section
+            structured[current_section] += line + "\n"
+    
+    # Clean up: strip trailing newlines and remove empty sections
+    for key in structured:
+        structured[key] = structured[key].strip()
+    
+    structured = {k: v for k, v in structured.items() if v}
+    
+    return structured
+
+def format_structured_resume(structured: Dict[str, str]) -> str:
+    """
+    Format structured resume dict back into readable text for NER input.
+    """
+    formatted = []
+    for section, content in structured.items():
+        if content:
+            formatted.append(f"\n## {section.upper()}\n{content}")
+    return "\n".join(formatted)

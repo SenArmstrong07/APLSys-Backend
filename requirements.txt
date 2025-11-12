@@ -9,6 +9,7 @@ pyparse
 layoutparser[cv]
 python-dotenv
 Pypdf2
+pymupdf
 google-cloud-vision
 python-multipart
 camelot-py
