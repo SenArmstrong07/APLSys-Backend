@@ -107,6 +107,7 @@ async def gemini_extract_resume_profile_endpoint(req: ResumeTextRequest):
             status="completed",
             details={"profile_sections": len(result) if isinstance(result, dict) else 0}
         )
+        print("DEBUG GEMINI RESULT:", result)
         return {**result, "task_id": task_id}
     except Exception as e:
         task_store.update_task(task_id, status="error", details={"error": str(e)})
@@ -331,6 +332,7 @@ async def deepseek_label_extracted_text(req: TextRequest):
             status="completed",
             details={"label_count": len(labeled) if isinstance(labeled, dict) else 0}
         )
+        print("DEBUG DEEPSEEK RESULT:", labeled)
         return {**labeled, "task_id": task_id}
     except Exception as e:
         task_store.update_task(task_id, status="error", details={"error": str(e)})
