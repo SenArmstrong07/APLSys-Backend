@@ -5,7 +5,8 @@ from doctr.models import ocr_predictor
 from transformers import pipeline, AutoTokenizer
 import uvicorn as uv
 import os
-
+import requests
+import json
 try:
     import certifi
     os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
@@ -13,7 +14,8 @@ try:
 except Exception:
     pass
 from fastapi import FastAPI
-
+from dotenv import load_dotenv
+load_dotenv()
 
 # Load models once and store in app state
 @asynccontextmanager

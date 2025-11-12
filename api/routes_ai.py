@@ -227,6 +227,7 @@ async def analyze_resume(req: ResumeAnalysisRequest):
             status="completed",
             details={"response_length": len(text) if text else 0}
         )
+        print("DEBUG RESULT:", text)
         return {"result": text, "task_id": task_id}
     except Exception as e:
         task_store.update_task(task_id, status="error", details={"error": str(e)})
