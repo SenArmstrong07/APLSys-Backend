@@ -4,6 +4,7 @@ import requests
 import os
 import time
 import threading
+import re
 from dotenv import load_dotenv
 from model.request_schema import ResumeAnalysisRequest
 from utils.img_to_b64 import image_to_base64
@@ -109,6 +110,26 @@ def check_rate_limit(client_ip: str):
         RATE_LIMIT_STORE[client_ip] = arr
         return True, None
 
+def clean_model_artifacts(text: str) -> str:
+    """
+    Remove Gemini/OpenRouter special artifacts such as:
+      - angle-bracket markers: <...>
+      - fullwidth-bar delimited tokens: ｜...｜
+      - repeated underscore or low-line markers (▁, _)
+    """
+    if not text:
+        return text
+    # remove <...> tokens
+    text = re.sub(r"<[^>]*>", "", text)
+    # remove fullwidth-bar delimited tokens like '｜begin▁of▁sentence｜'
+    text = re.sub(r"｜.*?｜", "", text)
+    # replace repeated underscores / U+2581 with spaces
+    text = re.sub(r"[_\u2581]+", " ", text)
+    # collapse multiple spaces/newlines
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+    
 @router.post("/gemini-extract-resume-profile")
 async def gemini_extract_resume_profile_endpoint(req: ResumeTextRequest):
     """Extract a structured resume profile using Gemini fallback."""
@@ -191,6 +212,8 @@ async def batch_analyze_resumes(
                     .get("parts", [{}])[0]
                     .get("text", "")
             )
+            # sanitize model artifacts before returning/storing
+            text = clean_model_artifacts(text)
             
             task_store.update_task(
                 file_task_id, 
@@ -249,6 +272,8 @@ async def analyze_resume(req: ResumeAnalysisRequest, request: Request):
             max_tokens=800,
         )
         text = completion.choices[0].message.content
+        # sanitize model artifacts before logging/returning
+        text = clean_model_artifacts(text or "")
         task_store.update_task(
             task_id, 
             status="completed",

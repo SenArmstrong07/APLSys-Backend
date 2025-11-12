@@ -5,6 +5,8 @@ from dotenv import load_dotenv
 from utils.img_to_b64 import image_to_base64
 from utils.openrouter_client import openrouter, OPENROUTER_MODEL, OPENROUTER_API_KEY
 import time
+import re
+
 # Load environment variables
 load_dotenv()
 
@@ -118,6 +120,7 @@ def deepseek_extract_metadata_from_text(extracted_text: str) -> dict:
     Use OpenRouter / Deepseek (via OpenRouter API) to extract and label structured metadata
     from OCR-extracted text, using only the allowed tags from DEFAULT_TAGS.
     Returns a JSON object with all detected fields, key-value pairs, and inferred structure.
+    This version sanitizes model artifacts and returns a clear error when no fields are detected.
     """
     allowed_tags = [
         'name', 'full_name', 'first_name', 'last_name', 'middle_name',
@@ -180,15 +183,35 @@ def deepseek_extract_metadata_from_text(extracted_text: str) -> dict:
     except Exception as e:
         return {"error": f"OpenRouter request failed: {str(e)}"}
 
+    # --- sanitize model artifacts (e.g. <...>, ｜...｜, U+2581 fragments) ---
+    def _clean_model_text(t: str) -> str:
+        if not isinstance(t, str):
+            return ""
+        t = re.sub(r"<[^>]+>", "", t)            # remove <...>
+        t = re.sub(r"｜.*?｜", "", t)            # remove fullwidth-bar delimited tokens
+        t = re.sub(r"[_\u2581]+", " ", t)       # replace underscores/U+2581 with spaces
+        t = re.sub(r"\s{2,}", " ", t)           # collapse multiple spaces
+        return t.strip()
+
+    cleaned = _clean_model_text(text)
+
+    # parse JSON object from cleaned text
     try:
-        if not isinstance(text, str) or not text:
-            return {"error": "Empty or non-text response from model", "raw": text}
-        start = text.find('{')
-        end = text.rfind('}') + 1
+        if not cleaned:
+            return {"error": "Empty response from model", "raw": text}
+        start = cleaned.find('{')
+        end = cleaned.rfind('}') + 1
         if start == -1 or end == 0:
-            return {"error": "No JSON object found in model response", "raw": text}
-        return json.loads(text[start:end])
+            # return raw for debugging instead of silent empty dict
+            return {"error": "No JSON object found in model response", "raw": cleaned[:1000]}
+        parsed = json.loads(cleaned[start:end])
+
+        # If parsed result is empty dict, return explicit message (helps frontend)
+        if isinstance(parsed, dict) and not parsed:
+            return {"error": "No fields detected", "raw": cleaned[:1500]}
+
+        return parsed
     except Exception:
-        return {"error": "Failed to parse OpenRouter response", "raw": text}
+        return {"error": "Failed to parse OpenRouter response", "raw": cleaned[:1500]}
 
 
