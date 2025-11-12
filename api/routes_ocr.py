@@ -328,9 +328,20 @@ async def extract_text_region(ocrreq: Request, file: UploadFile = File(...)):
                 if not isinstance(block, dict):
                     continue
                 for line in block.get("lines", []):
-                    line_text = " ".join([word.get("value", "") for word in line.get("words", [])])
-                    text.append(line_text)
-                    for word in line.get("words", []):
+                    # sort words left-to-right using geometry if available to preserve correct reading order
+                    words = line.get("words", []) or []
+                    def _word_x(w):
+                        geom = w.get("geometry") or []
+                        # geometry expected as list of [ [x,y], ... ] normalized coordinates
+                        if isinstance(geom, list) and len(geom) and isinstance(geom[0], list):
+                            xs = [pt[0] for pt in geom if isinstance(pt, list) and len(pt) >= 2]
+                            return min(xs) if xs else 0.0
+                        return 0.0
+                    words_sorted = sorted(words, key=_word_x)
+                    line_text = " ".join([w.get("value", "") for w in words_sorted]).strip()
+                    if line_text:
+                        text.append(line_text)
+                    for word in words_sorted:
                         if "confidence" in word and word["confidence"] is not None:
                             confidences.append(word["confidence"])
         
