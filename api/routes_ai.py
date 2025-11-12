@@ -20,7 +20,7 @@ router = APIRouter()
 task_store = TaskStore()
 load_dotenv()
 
-GEMINI_MODEL = "gemini-2.5-pro"
+GEMINI_MODEL = "gemini-2.5-flash"
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 

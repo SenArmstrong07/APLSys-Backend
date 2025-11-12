@@ -4,11 +4,12 @@ import json
 from dotenv import load_dotenv
 from utils.img_to_b64 import image_to_base64
 from utils.openrouter_client import openrouter, OPENROUTER_MODEL, OPENROUTER_API_KEY
+import time
 # Load environment variables
 load_dotenv()
 
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
-GEMINI_MODEL = "gemini-2.5-pro"
+GEMINI_MODEL = "gemini-2.5-flash"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 def validate_resume_text(text: str) -> bool:
@@ -23,79 +24,94 @@ def validate_resume_text(text: str) -> bool:
     text_lower = text.lower()
     return any(indicator in text_lower for indicator in resume_indicators)
 
-def gemini_extract_resume_profile(full_text: str) -> dict:
+def gemini_extract_resume_profile(full_text: str, model_name=GEMINI_MODEL) -> dict:
     """
-    Use Gemini to extract a structured resume profile from raw resume text.
+    Send a minimal / truncated payload to Gemini to extract a structured resume JSON.
+    Implements retries on 503 and falls back to a smaller model if needed.
     """
-    prompt = (
-        "Given the following resume text, extract all details into a JSON object with this structure:\n"
-        "{\n"
-        "  \"profile\": {\n"
-        "    \"firstName\": \"\",\n"
-        "    \"middleName\": \"\",\n"
-        "    \"lastName\": \"\",\n"
-        "    \"age\": \"\",\n"
-        "    \"gender\": \"\",\n"
-        "    \"email\": \"\",\n"
-        "    \"phone\": \"\",\n"
-        "    \"location\": \"\",\n"
-        "    \"url\": \"\",\n"
-        "    \"summary\": \"\"\n"
-        "  },\n"
-        "  \"educations\": [\n"
-        "    {\"school\": \"\", \"degree\": \"\", \"gpa\": \"\", \"date\": \"\", \"descriptions\": \"\"}\n"
-        "  ],\n"
-        "  \"workExperiences\": [\n"
-        "    {\"company\": \"\", \"jobTitle\": \"\", \"date\": \"\", \"descriptions\": \"\"}\n"
-        "  ],\n"
-        "  \"projects\": [\n"
-        "    {\"project\": \"\", \"date\": \"\", \"descriptions\": \"\"}\n"
-        "  ],\n"
-        "  \"skills\": {\n"
-        "    \"descriptions\": \"\",\n"
-        "    \"featuredSkills\": [{\"skill\": \"\"}]\n"
-        "  }\n"
-        "}\n"
-        "Fill in as much as possible from the resume. Use empty strings for missing fields. "
-        "Resume Text:\n"
-        f"{full_text}\n"
-        "JSON:"
-    )
-    url = f"{BASE_URL}/models/{GEMINI_MODEL}:generateContent"
+    load_dotenv()
+    model = model_name or os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    url = f"{BASE_URL}/models/{model}:generateContent"
     headers = {
         "Content-Type": "application/json",
         "x-goog-api-key": GEMINI_API_KEY
     }
-    payload = {
-        "contents": [
-            {"parts": [{"text": prompt}]}
-        ]
-    }
+
+    # Minimalization strategy:
+    # - keep top-of-resume header (first 8 non-empty lines)
+    # - keep the first 3000 chars afterwards (avoid sending entire file)
+    lines = [ln.strip() for ln in full_text.splitlines() if ln.strip()]
+    header = "\n".join(lines[:8]) if lines else full_text[:200]
+    tail = full_text[:3000] if len(full_text) > 3000 else full_text
+    minimized = f"{header}\n\n{tail}"
+
+    prompt = (
+        "Extract the resume into a compact JSON object with fields: profile (firstName, middleName, lastName, "
+        "email, phone, location, summary), educations (school, degree, gpa, date), workExperiences (company, jobTitle, date, descriptions), "
+        "skills (list). Return ONLY the JSON object, no explanation.\n\n"
+        "Resume Text:\n"
+        f"{minimized}\n\nJSON:"
+    )
+
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+
+    # Try a few retries on 503 with exponential backoff
+    for attempt in range(3):
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=30)
+            # if we got a response object, check status
+            if resp.status_code == 503:
+                time.sleep(2 ** attempt)
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            text = (
+                data.get("candidates", [{}])[0]
+                    .get("content", {})
+                    .get("parts", [{}])[0]
+                    .get("text", "")
+            )
+            # Try to extract JSON blob from the response text
+            try:
+                start = text.find('{')
+                end = text.rfind('}') + 1
+                profile_json = json.loads(text[start:end])
+                return profile_json
+            except Exception:
+                return {"error": "Failed to parse Gemini response", "raw": text}
+        except requests.exceptions.HTTPError as e:
+            # If a 503 was returned without body, try again; otherwise re-raise
+            if resp is not None and resp.status_code == 503:
+                time.sleep(2 ** attempt)
+                continue
+            raise e
+        except requests.exceptions.RequestException:
+            # network/timeout: backoff and retry
+            time.sleep(2 ** attempt)
+            continue
+
+    # Fallback to a smaller model to reduce load / likelihood of 503
+    fallback_model = "gemini-2.5-flash"
     try:
-        response = requests.post(url, json=payload, headers=headers)
-        
-        response.raise_for_status()
-        data = response.json()
+        url_fb = f"{BASE_URL}/models/{fallback_model}:generateContent"
+        resp = requests.post(url_fb, json=payload, headers=headers, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
         text = (
             data.get("candidates", [{}])[0]
                 .get("content", {})
                 .get("parts", [{}])[0]
                 .get("text", "")
         )
-    except requests.exceptions.HTTPError as e:
-        if response.status_code == 503:
-            return {"error": "Gemini service unavailable. Please try again later."}
-        raise e
-    except requests.exceptions.RequestException as e:
-        return {"error": f"Request failed: {str(e)}"}
-    import json
-    try:
-        start = text.find('{')
-        end = text.rfind('}') + 1
-        profile_json = json.loads(text[start:end])
-        return profile_json
+        try:
+            start = text.find('{')
+            end = text.rfind('}') + 1
+            profile_json = json.loads(text[start:end])
+            return profile_json
+        except Exception:
+            return {"error": "Failed to parse fallback Gemini response", "raw": text}
     except Exception:
-        return {"error": "Failed to parse Gemini response", "raw": text}
+        return {"error": "Gemini service unavailable. Please try again later."}
     
 def deepseek_extract_metadata_from_text(extracted_text: str) -> dict:
     """

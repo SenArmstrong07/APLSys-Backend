@@ -2,7 +2,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from api import routes_ocr, routes_ai, routes_debug, routes_parser
 from doctr.models import ocr_predictor
-from transformers import pipeline
+from transformers import pipeline, AutoTokenizer
 import uvicorn as uv
 import os
 
@@ -37,11 +37,11 @@ async def lifespan(app: FastAPI):
     
     
     #For Resume Parsing
-    model_basic = "DeezNutz1337/Bert-based-Resume-Profiler_BASIC"
-    profiling_pipeline_basic= pipeline(task = "ner", model=model_basic, aggregation_strategy="simple")
+    model_basic = "DeezNutz1337/Bert-Based-Resume-Profiler_BASIC"
+    profiling_pipeline_basic= pipeline(task = "token-classification", model=model_basic, aggregation_strategy="simple")
     
-    model_semantic = "DeezNutz1337/Bert-based-Resume-Profiler_SEMANTIC"
-    profiling_pipeline_semantic= pipeline(task = "ner", model=model_semantic, aggregation_strategy="simple")
+    model_semantic = "DeezNutz1337/Bert-Based-Resume-Profiler_SEMANTIC"
+    profiling_pipeline_semantic= pipeline(task = "token-classification", model=model_semantic, aggregation_strategy="simple")
 
     app.state.ner_resume_pipeline_basic = profiling_pipeline_basic
     app.state.ner_resume_pipeline_semantic = profiling_pipeline_semantic
@@ -54,7 +54,6 @@ async def lifespan(app: FastAPI):
     print("Shutting down...")
 
 app = FastAPI(title="APLSys Backend", lifespan=lifespan)
-
 app.add_middleware(CORSMiddleware,
                allow_origins=["*"],
                allow_credentials=True,
