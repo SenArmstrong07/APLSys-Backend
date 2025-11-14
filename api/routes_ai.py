@@ -57,9 +57,6 @@ def build_prompt(req: ResumeAnalysisRequest) -> str:
 Use ONLY '##' (two hashes) for section headers. Do NOT use '###', bold, italics, or any other markdown styles.
 For each '##' section provide NO MORE THAN 2 sentences. Keep lists short (max 3 items). Do not add any commentary outside the sections.
 
-## Overall Assessment
-In up to 2 sentences, give a focused assessment of the resume's quality, strengths, and main weaknesses.
-
 ## Skills Analysis
 - Skill Proficiency: In 1-2 sentences, summarize the candidate's apparent skill levels.
 - Missing Skills: In 1-2 sentences, list the most critical missing skills (max 3 short phrases).
@@ -72,14 +69,16 @@ List up to 3 concise strengths (each 1 short phrase or sentence).
 
 ## Resume Score
 Single-line: "Resume Score: XX/100"
-
 """
+
     base_prompt += f"\nResume Text:\n{req.resume}\n"
+
     if req.job_role:
         base_prompt += f"""
 ## Role Alignment Analysis
 In up to 2 sentences, explain how the resume aligns with the role: {req.job_role} and give 1-2 focused recommendations.
 """
+
     if req.job_description:
         base_prompt += f"""
 ## Job Match Analysis
@@ -88,7 +87,14 @@ In up to 2 sentences, compare the resume to the job description and provide a jo
 ## Key Job Requirements Not Met
 List up to 3 of the most critical missing requirements as short phrases and a 1-line suggestion for addressing them.
 """
+
+    base_prompt += f"""
+## Overall Assessment
+In up to 2 sentences, give a direct hiring recommendation based on the resume, the role (if provided), and the job description (if provided). Clearly state whether the candidate *should* or *should not* be hired and briefly justify why.
+"""
+
     return base_prompt
+
 
 # --- Simple in-memory rate limiter (per-IP) ---
 RATE_LIMIT_LOCK = threading.Lock()
