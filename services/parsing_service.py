@@ -5,6 +5,16 @@ from docx import Document
 import pandas as pd
 import re
 from typing import Dict, List
+import os
+import fitz
+from doctr.io import DocumentFile
+from typing import Optional
+
+# try to import python-docx; keep optional to avoid hard failure at import time
+try:
+    from docx import Document as DocxDocument
+except Exception:
+    DocxDocument = None
 
 def extract_email(text):
     match = re.search(r"\b[\w\.-]+@[\w\.-]+\.\w+\b", text)
@@ -111,24 +121,71 @@ def lbl_resume_text(text: str, ner_pipeline):
     return {"entities": merged_entities}
 
 #General use, digital documents
-def parse_document_text(text: str, ner_pipeline):
+def parse_document_text(path: str, ocr_model) -> str:
     """
-    Parse general digital document text using a NER pipeline.
-    Returns extracted entities with their entity_group for debugging.
+    Extract raw text from a document file at `path`.
+    Supported: .pdf (PyMuPDF), .docx (python-docx), image files (DocTR via ocr_model).
+    Returns plain text (no further parsing).
     """
-    result = ner_pipeline(text)
-    entities = []
-    for entity in result:
-        if "score" in entity:
-            entity["score"] = float(entity["score"])
-        # Add entity_group and word for debugging
-        print(entity.get("entity_group"))
-        entities.append({
-            "entity": entity.get("word", ""),
-            "entity_group": entity.get("entity_group", ""),
-            "score": entity.get("score", 0)
-        })
-    return {"entities": entities}
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"File not found: {path}")
+
+    _, ext = os.path.splitext(path)
+    ext = (ext or "").lower()
+
+    def _clean_text(s: str) -> str:
+        # join hyphenated line-breaks and normalize whitespace
+        s = re.sub(r"-\s*\n\s*", "", s)
+        s = "\n".join([ln.rstrip() for ln in s.splitlines()])
+        s = re.sub(r"\n{3,}", "\n\n", s)
+        return s.strip()
+
+    # PDF
+    if ext == ".pdf":
+        txt_parts = []
+        pdf = fitz.open(path)
+        for p in pdf:
+            txt_parts.append(p.get_text("text"))
+        pdf.close()
+        return _clean_text("\n".join(str(p) for p in txt_parts))
+
+    # DOCX
+    if ext == ".docx":
+        if DocxDocument is None:
+            raise RuntimeError("python-docx not installed; cannot extract .docx text")
+        doc = DocxDocument(path)
+        paragraphs = [p.text for p in doc.paragraphs if p.text and p.text.strip()]
+        return _clean_text("\n".join(paragraphs))
+
+    # Images (common raster image extensions)
+    if ext in (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"):
+        if ocr_model is None:
+            raise RuntimeError("ocr_model must be provided for image text extraction (DocTR)")
+        # Use DocTR DocumentFile.from_images and the provided predictor
+        doc = DocumentFile.from_images([path])
+        result = ocr_model(doc)
+        exported = result.export()
+        parts = []
+        for page in exported.get("pages", []):
+            for block in page.get("blocks", []):
+                for line in block.get("lines", []):
+                    # sort words left-to-right if geometry exists
+                    words = line.get("words", []) or []
+                    try:
+                        words = sorted(words, key=lambda w: (min([pt[0] for pt in w.get("geometry", [])]) if w.get("geometry") else 0.0))
+                    except Exception:
+                        pass
+                    parts.append(" ".join(w.get("value", "") for w in words).strip())
+        return _clean_text("\n".join([p for p in parts if p]))
+
+    # Unknown extension: attempt best-effort PDF/open fallback by trying PyMuPDF open
+    try:
+        pdf = fitz.open(path)
+        txt_parts = [p.get_text("text") for p in pdf]
+        pdf.close()
+        return _clean_text("\n".join(str(p) for p in txt_parts))
+    except Exception:
+        raise RuntimeError(f"Unsupported file type or extraction failed for: {path}")
 
 def extract_tables_from_pdf(pdf_path, pages="all"):
     """

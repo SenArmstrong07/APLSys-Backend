@@ -168,47 +168,64 @@ async def extract_resume_txt(request: Request, file: UploadFile = File(...)):
         filename=file.filename
     )
     
+    ocr_model = request.app.state.ocr_model
+    
+    temp_path = None
     try:
         task_store.update_task(task_id, status="processing")
         print("File received. Waiting for extraction...")
         
-        # Fast path for born-digital PDFs using PyMuPDF
+        # Read uploaded file bytes once
         file_bytes = await file.read()
-        try:
-            print("Trying PyMuPDF for text extraction...")
-            pdf = fitz.open(stream=file_bytes, filetype="pdf")
-            plain_text = []
-            for p in pdf:
-                # 'text' is fastest; use 'blocks' or 'dict' for layout/bboxes
-                plain_text.append(p.get_text("text"))
-            plain_text = "\n".join(plain_text)
-            print("PyMuPDF extraction successful.")
-        except Exception:
-            # Fallback to DocTR for scanned images or corrupt PDFs
-            print("Defaulting to DocTR for text extraction...")
-            model = request.app.state.ocr_model
-            doc = DocumentFile.from_pdf(file_bytes)
-            result = model(doc)
-            exported = result.export()
-            plain_parts = []
-            for page in exported.get("pages", []):
-                for block in page.get("blocks", []):
-                    for line in block.get("lines", []):
-                        plain_parts.append(" ".join(w["value"] for w in line.get("words", [])))
-            plain_text = "\n".join(plain_parts)
-            print("DocTR extraction successful.")
-        
+        _, ext = os.path.splitext(file.filename or "")
+        ext = ext.lower()
+
+        # Helper to save bytes to a temp file (used for docx / image fallbacks)
+        def _save_temp(bts):
+            p = f"temp_{file.filename}"
+            with open(p, "wb") as tf:
+                tf.write(bts)
+            return p
+
+        # 1) DOCX -> use parsing_service (assumed to handle docx)
+        if ext == ".docx":
+            temp_path = _save_temp(file_bytes)
+            plain_text = parse_document_text(temp_path, ocr_model)
+
+        # 2) Images -> use parsing_service (DocTR or image OCR path)
+        elif ext in (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"):
+            print("Image file detected — using image OCR path (DocTR via parsing_service).")
+            temp_path = _save_temp(file_bytes)
+            plain_text = parse_document_text(temp_path, ocr_model)
+
+        # 3) PDF -> fast path with PyMuPDF, fallback to parsing_service if it fails
+        else:
+            try:
+                print("Trying PyMuPDF for PDF text extraction...")
+                pdf = fitz.open(stream=file_bytes, filetype="pdf")
+                pages_text = []
+                for p in pdf:
+                    pages_text.append(p.get_text("text"))
+                plain_text = "\n".join(pages_text)
+                print("PyMuPDF extraction successful.")
+            except Exception:
+                print("PyMuPDF failed — falling back to parsing_service (DocTR) if available.")
+                temp_path = _save_temp(file_bytes)
+                plain_text = parse_document_text(temp_path, ocr_model)
+
         task_store.update_task(
             task_id, 
             status="completed",
-            details={"text_length": len(plain_text)}
+            details={"text_length": len(plain_text) if isinstance(plain_text, str) else 0}
         )
         return {"text": plain_text, "task_id": task_id}
     except Exception as e:
         task_store.update_task(task_id, status="error", details={"error": str(e)})
         raise
-    
-    
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+
 @router.post("/ner-extract-resume-profile")
 async def ner_extract_resume_profile(req: ResumeTextRequest, request: Request):
     """
@@ -258,11 +275,11 @@ async def ner_extract_resume_profile(req: ResumeTextRequest, request: Request):
             details={"entity_types": list(combined.keys())}
         )
         
-        print("DEBUG RESULTS:", combined)
+        print("DEBUG RESULTS:", semantic_entities)
 
         return {
             "task_id": task_id,
-            "parsed_entities": combined,
+            "parsed_entities": semantic_entities,
             "summary": {
                 "entity_count": len(combined),
                 "text_length": len(req.text)
