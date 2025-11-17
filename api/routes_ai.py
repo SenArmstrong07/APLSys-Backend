@@ -11,6 +11,7 @@ from utils.img_to_b64 import image_to_base64
 from typing import List, Optional
 from PyPDF2 import PdfReader
 import io
+import json
 from model.request_schema import ResumeTextRequest, TextRequest
 from services.ai_service import (
     gemini_extract_resume_profile,
@@ -135,28 +136,88 @@ def clean_model_artifacts(text: str) -> str:
     text = re.sub(r"[ \t]{2,}", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
-    
+
 @router.post("/gemini-extract-resume-profile")
-async def gemini_extract_resume_profile_endpoint(req: ResumeTextRequest):
-    """Extract a structured resume profile using Gemini fallback."""
+async def gemini_extract_resume_profile_endpoint(req: ResumeTextRequest, request: Request):
+    """Extract a structured resume profile using Gemini fallback and OpenRouter as fallback."""
     if not validate_resume_text(req.text):
         return {"error": "Text does not appear to be a resume"}
-    
+
     task_id = task_store.create_task(
         task_type="gemini_resume_extract",
         details={"text_length": len(req.text)}
     )
-    
+
     try:
         task_store.update_task(task_id, status="processing")
-        result = gemini_extract_resume_profile(req.text)
-        task_store.update_task(
-            task_id, 
-            status="completed",
-            details={"profile_sections": len(result) if isinstance(result, dict) else 0}
-        )
-        print("DEBUG GEMINI RESULT:", result)
-        return {**result, "task_id": task_id}
+
+        # 1) Primary: Gemini
+        try:
+            result = gemini_extract_resume_profile(req.text)
+        except Exception as e:
+            result = {"error": f"gemini_call_failed: {str(e)}"}
+
+        # If Gemini returned an explicit error or empty dict -> fallback to OpenRouter
+        if not isinstance(result, dict) or ("error" in result) or (isinstance(result, dict) and not result):
+            # Build a compact JSON-only prompt for OpenRouter to extract a resume profile
+            prompt = (
+                "You are an expert resume extractor. Return EXACTLY one JSON object and NOTHING ELSE.\n"
+                "Fields required (use these keys exactly):\n"
+                "profile: {firstName, middleName, lastName, email, phone, location, summary},\n"
+                "educations: [{school, degree, startDate, endDate, details}],\n"
+                "work_experiences: [{company, title, startDate, endDate, descriptions}],\n"
+                "skills: [strings],\n"
+                "certifications: [strings]\n\n"
+                f"Resume Text:\n{req.text}\n\n"
+                "Return only the JSON object."
+            )
+
+            try:
+                # Use OpenRouter client (same style as analyze-resume)
+                extra_headers = {}
+                if OPENROUTER_API_KEY is None:
+                    raise RuntimeError("OPENROUTER_API_KEY not set")
+
+                completion = client.chat.completions.create(
+                    extra_headers=extra_headers,
+                    extra_body={},
+                    model=OPENROUTER_MODEL,
+                    messages=[
+                        {"role": "system", "content": "You are an expert resume extractor. RETURN JSON ONLY."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.0,
+                    max_tokens=800,
+                )
+                text = completion.choices[0].message.content or ""
+                cleaned = clean_model_artifacts(text)
+                # Try to extract JSON object from cleaned text
+                start = cleaned.find("{")
+                end = cleaned.rfind("}") + 1
+                if start == -1 or end == 0:
+                    # both Gemini and OpenRouter failed to return parseable JSON
+                    task_store.update_task(task_id, status="error", details={"error": "No JSON from Gemini or OpenRouter", "gemini": result, "openrouter_raw": cleaned[:1000]})
+                    return {"error": "Failed to extract structured resume (no JSON returned)", "task_id": task_id, "details": {"gemini": result, "openrouter_raw": cleaned[:1000]}}
+                parsed = json.loads(cleaned[start:end])
+                task_store.update_task(
+                    task_id,
+                    status="completed",
+                    details={"profile_sections": len(parsed) if isinstance(parsed, dict) else 0, "source": "openrouter_fallback"}
+                )
+                print("DEBUG GEMINI RESULT (fallback -> openrouter):", parsed)
+                return {**parsed, "task_id": task_id, "source": "openrouter_fallback"}
+            except Exception as e:
+                task_store.update_task(task_id, status="error", details={"error": str(e)})
+                raise
+        else:
+            # Gemini succeeded
+            task_store.update_task(
+                task_id,
+                status="completed",
+                details={"profile_sections": len(result) if isinstance(result, dict) else 0, "source": "gemini"}
+            )
+            print("DEBUG GEMINI RESULT:", result)
+            return {**result, "task_id": task_id, "source": "gemini"}
     except Exception as e:
         task_store.update_task(task_id, status="error", details={"error": str(e)})
         raise
