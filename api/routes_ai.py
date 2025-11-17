@@ -5,6 +5,8 @@ import os
 import time
 import threading
 import re
+import asyncio
+import random
 from dotenv import load_dotenv
 from model.request_schema import ResumeAnalysisRequest
 from utils.img_to_b64 import image_to_base64
@@ -28,8 +30,61 @@ GEMINI_MODEL = "gemini-2.5-flash"
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
+GEMINI_RATE_LIMIT_LOCK = threading.Lock()
+GEMINI_LAST_CALL_TIME = 0.0
+GEMINI_MIN_INTERVAL = 3.0  # minimum seconds between Gemini calls (tweakable)
+
 
 #- **Current Skills**: [List ALL skills the candidate demonstrates in their resume, categorized by type (technical, soft, domain-specific, etc.). Be comprehensive.]
+
+def check_gemini_rate_limit() -> tuple:
+    """
+    Global limiter: ensures a minimum interval between Gemini requests.
+    Returns (allowed: bool, wait_time_seconds: float|None)
+    """
+    global GEMINI_LAST_CALL_TIME
+    now = time.time()
+    with GEMINI_RATE_LIMIT_LOCK:
+        elapsed = now - GEMINI_LAST_CALL_TIME
+        if elapsed < GEMINI_MIN_INTERVAL:
+            return False, GEMINI_MIN_INTERVAL - elapsed
+        GEMINI_LAST_CALL_TIME = now
+        return True, None
+    
+    
+async def call_gemini_with_retries(text: str, attempts: int = 3, base_delay: float = 1.0, max_delay: float = 8.0) -> dict:
+    """
+    Call synchronous `gemini_extract_resume_profile` in a thread with retries,
+    exponential backoff and jitter. Returns the dict result or an error dict.
+    """
+    last_exc = None
+    for attempt in range(1, attempts + 1):
+        # Global cooldown check
+        allowed, wait = check_gemini_rate_limit()
+        if not allowed:
+            await asyncio.sleep(wait)
+
+        try:
+            # run blocking gemini call off the event loop
+            result = await asyncio.to_thread(gemini_extract_resume_profile, text)
+            # If result is dict and not an empty dict and not containing "error", treat as success
+            if isinstance(result, dict) and result and "error" not in result:
+                return result
+            # If model returned an explicit error, propagate for retry
+            last_exc = result if isinstance(result, dict) else {"error": "Unknown non-dict Gemini response"}
+        except Exception as e:
+            last_exc = {"error": str(e)}
+
+        # If not last attempt, backoff with jitter
+        if attempt < attempts:
+            delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
+            jitter = random.uniform(0, delay * 0.5)
+            await asyncio.sleep(delay + jitter)
+
+    # Exhausted retries: return last error/result
+    return last_exc or {"error": "gemini_failed_unknown"}
+
+
 
 # Add to both routes_parser.py and routes_ai.py
 @router.get("/tasks")
@@ -152,10 +207,12 @@ async def gemini_extract_resume_profile_endpoint(req: ResumeTextRequest, request
         task_store.update_task(task_id, status="processing")
 
         # 1) Primary: Gemini
-        try:
-            result = gemini_extract_resume_profile(req.text)
-        except Exception as e:
-            result = {"error": f"gemini_call_failed: {str(e)}"}
+        # try:
+        #     result = gemini_extract_resume_profile(req.text)
+        # except Exception as e:
+        #     result = {"error": f"gemini_call_failed: {str(e)}"}
+        
+        result = await call_gemini_with_retries(req.text, attempts=3, base_delay=1.0, max_delay=8.0)
 
         # If Gemini returned an explicit error or empty dict -> fallback to OpenRouter
         if not isinstance(result, dict) or ("error" in result) or (isinstance(result, dict) and not result):
@@ -303,8 +360,11 @@ async def analyze_resume(req: ResumeAnalysisRequest, request: Request):
     client_ip = getattr(request.client, "host", "unknown")
     allowed, retry_after = check_rate_limit(client_ip)
     if not allowed:
-        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                            detail=f"Rate limit exceeded. Try again in {int(retry_after or 0)}s.")
+        retry = int(retry_after or 0)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Rate limit exceeded. Try again in {retry}s.",
+            headers={"Retry-After": str(retry)})
     task_id = task_store.create_task(
         task_type="resume_analysis",
         details={
