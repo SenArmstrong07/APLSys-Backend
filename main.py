@@ -2,11 +2,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from api import routes_ocr, routes_ai, routes_debug, routes_parser
 from doctr.models import ocr_predictor
-from transformers import pipeline, AutoTokenizer
+from transformers import pipeline
 import uvicorn as uv
 import os
 import requests
 import json
+from functools import lru_cache
+import threading
 try:
     import certifi
     os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
@@ -17,39 +19,53 @@ from fastapi import FastAPI
 from dotenv import load_dotenv
 load_dotenv()
 
-# Load models once and store in app state
+# Thread-safe model loading with lazy initialization
+MODEL_LOCK = threading.Lock()
+
+@lru_cache(maxsize=1)
+def get_ocr_model():
+    """Load OCR model only when first requested"""
+    with MODEL_LOCK:
+        print("Loading OCR model (lazy)...")
+        return ocr_predictor(
+            det_arch="db_resnet50",
+            reco_arch="vitstr_base",
+            pretrained=True,
+            assume_straight_pages=False,
+            straighten_pages=True,
+            detect_orientation=True
+        )
+
+@lru_cache(maxsize=1)
+def get_ner_pipeline_basic():
+    """Load basic NER model only when first requested"""
+    with MODEL_LOCK:
+        print("Loading basic NER model (lazy)...")
+        model_basic = "DeezNutz1337/Bert-Based-Resume-Profiler_BASIC"
+        return pipeline(task="token-classification", model=model_basic, aggregation_strategy="simple")
+
+@lru_cache(maxsize=1)
+def get_ner_pipeline_semantic():
+    """Load semantic NER model only when first requested"""
+    with MODEL_LOCK:
+        print("Loading semantic NER model (lazy)...")
+        model_semantic = "DeezNutz1337/Bert-Based-Resume-Profiler_SEMANTIC"
+        return pipeline(task="token-classification", model=model_semantic, aggregation_strategy="simple")
+
+@lru_cache(maxsize=1)
+def get_ner_pipeline_general():
+    """Load general NER model only when first requested"""
+    with MODEL_LOCK:
+        print("Loading general NER model (lazy)...")
+        model_general = "dbmdz/bert-large-cased-finetuned-conll03-english"
+        return pipeline(task="token-classification", model=model_general, aggregation_strategy="simple")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("Loading OCR model...")
-    app.state.ocr_model = ocr_predictor(
-        det_arch="db_resnet50", #Fastest detection model
-        reco_arch="vitstr_base", #Most accurate recognition model
-        pretrained=True,
-        assume_straight_pages=False,  # Better for receipts
-        straighten_pages=True,        # Automatically straighten skewed images
-        detect_orientation=True       # Detect and correct orientation
-    )
-
-    print("Loading NER models...")
+    print("FastAPI startup - Models will load on first use (lazy loading)")
     
-    #For General OCR usage
-    #tokenizer_general = AutoTokenizer.from_pretrained("dbmdz/bert-large-cased-finetuned-conll03-english")
-    model_general = "dbmdz/bert-large-cased-finetuned-conll03-english"
-    general_ner_pipeline = pipeline(task = "token-classification", model=model_general, aggregation_strategy="simple")
-    
-    
-    #For Resume Parsing
-    model_basic = "DeezNutz1337/Bert-Based-Resume-Profiler_BASIC"
-    profiling_pipeline_basic= pipeline(task = "token-classification", model=model_basic, aggregation_strategy="simple")
-    
-    model_semantic = "DeezNutz1337/Bert-Based-Resume-Profiler_SEMANTIC"
-    profiling_pipeline_semantic= pipeline(task = "token-classification", model=model_semantic, aggregation_strategy="simple")
-
-    app.state.ner_resume_pipeline_basic = profiling_pipeline_basic
-    app.state.ner_resume_pipeline_semantic = profiling_pipeline_semantic
-    app.state.general_ner_pipeline = general_ner_pipeline
-    
-    print("Models ready!")
+    # get_ocr_model()
+    # get_ner_pipeline_basic()
     
     yield
     
@@ -62,6 +78,12 @@ app.add_middleware(CORSMiddleware,
                allow_methods=["*"],
                allow_headers=["*"]
                )
+
+# Store model getters in app state for routes to access
+app.state.get_ocr_model = get_ocr_model
+app.state.get_ner_resume_pipeline_basic = get_ner_pipeline_basic
+app.state.get_ner_resume_pipeline_semantic = get_ner_pipeline_semantic
+app.state.get_general_ner_pipeline = get_ner_pipeline_general
 
 
 # Register API routes
@@ -78,4 +100,3 @@ def root():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uv.run("main:app", host="0.0.0.0", port=port, reload=True)
-   

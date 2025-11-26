@@ -224,7 +224,7 @@ async def batch_ocr(ocrreq: Request, files: List[UploadFile] = File(...)):
     """
     Run OCR on multiple uploaded files and return only the extracted text.
     """
-    model = ocrreq.app.state.ocr_model
+    model = ocrreq.app.state.get_ocr_model()
     
     # create a batch task
     batch_task_id = task_store.create_task("batch_ocr", filename=None, details={"file_count": len(files)})
@@ -292,7 +292,7 @@ async def extract_text_full(file: UploadFile, ocrreq: Request):
     
     try:
         task_store.update_task(task_id, status="processing")
-        model = ocrreq.app.state.ocr_model
+        model = ocrreq.app.state.get_ocr_model()
         content = await file.read()
         # Normalize input (pdf/docx/image bytes) into the DocumentFile/exported dict
         doc, exported = extract_on_document(content, model)
@@ -315,7 +315,7 @@ async def extract_text_region(ocrreq: Request, file: UploadFile = File(...)):
     
     try:
         task_store.update_task(task_id, status="processing")
-        model = ocrreq.app.state.ocr_model
+        model = ocrreq.app.state.get_ocr_model()
         content = await file.read()
         
         # Normalize bytes/path into exported OCR structure (dict with "pages")
