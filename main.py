@@ -1,12 +1,9 @@
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from api import routes_ocr, routes_ai, routes_debug, routes_parser
-from doctr.models import ocr_predictor
 from transformers import pipeline
 import uvicorn as uv
 import os
-import requests
-import json
 from functools import lru_cache
 import threading
 try:
@@ -19,23 +16,24 @@ from fastapi import FastAPI
 from dotenv import load_dotenv
 load_dotenv()
 
-# Thread-safe model loading with lazy initialization
 MODEL_LOCK = threading.Lock()
 
+# TrOCR models
 @lru_cache(maxsize=1)
-def get_ocr_model():
-    """Load OCR model only when first requested"""
+def get_trocr_printed():
+    """Load TrOCR model for printed text"""
     with MODEL_LOCK:
-        print("Loading OCR model (lazy)...")
-        return ocr_predictor(
-            det_arch="db_resnet50",
-            reco_arch="vitstr_base",
-            pretrained=True,
-            assume_straight_pages=False,
-            straighten_pages=True,
-            detect_orientation=True
-        )
+        print("Loading TrOCR model (printed)...")
+        return pipeline(task="image-to-text", model="microsoft/trocr-large-printed")
 
+@lru_cache(maxsize=1)
+def get_trocr_handwritten():
+    """Load TrOCR model for handwritten text"""
+    with MODEL_LOCK:
+        print("Loading TrOCR model (handwritten)...")
+        return pipeline(task="image-to-text", model="microsoft/trocr-large-handwritten")
+
+# NER models still load locally (they're smaller)
 @lru_cache(maxsize=1)
 def get_ner_pipeline_basic():
     """Load basic NER model only when first requested"""
@@ -63,9 +61,7 @@ def get_ner_pipeline_general():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("FastAPI startup - Models will load on first use (lazy loading)")
-    
-    # get_ocr_model()
-    # get_ner_pipeline_basic()
+    print("OCR will use TrOCR (microsoft/trocr-large-printed and handwritten)")
     
     yield
     
@@ -79,12 +75,12 @@ app.add_middleware(CORSMiddleware,
                allow_headers=["*"]
                )
 
-# Store model getters in app state for routes to access
-app.state.get_ocr_model = get_ocr_model
+# Store model getters in app state
+app.state.get_trocr_printed = get_trocr_printed
+app.state.get_trocr_handwritten = get_trocr_handwritten
 app.state.get_ner_resume_pipeline_basic = get_ner_pipeline_basic
 app.state.get_ner_resume_pipeline_semantic = get_ner_pipeline_semantic
 app.state.get_general_ner_pipeline = get_ner_pipeline_general
-
 
 # Register API routes
 app.include_router(routes_ocr.router, prefix="/ocr", tags=["OCR"])
@@ -95,7 +91,6 @@ app.include_router(routes_parser.router, prefix="/parser", tags=["PARSER"])
 @app.get("/")
 def root():
     return {"message": "Backend is running"}
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))

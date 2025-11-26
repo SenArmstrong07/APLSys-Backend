@@ -5,7 +5,6 @@ from services.ocr_service import (
     extract_on_document,
     search_word,
     collect_all_pages,
-    google_vision_ocr,
     extract_context,
     ocr_space_ocr,
     pdf_to_images_bytes,
@@ -16,13 +15,18 @@ from services.ocr_service import (
 )
 from utils.task_store import TaskStore
 from typing import Optional
+from PIL import Image
+import numpy as np
+import cv2
+import io
 import json
 import os
 from pathlib import Path
 from typing import List, Dict, Any
 from model.request_schema import SearchRequest, TaskCreateRequest, TaskCreateBatchRequest
-router = APIRouter()
+import asyncio
 
+router = APIRouter()
 task_store = TaskStore()
 
 @router.get("/status")
@@ -45,7 +49,6 @@ async def get_ocr_status():
     """
     return get_processing_status()
 
-# New: create tasks endpoint that supports batch creation and returns per-file task ids
 @router.post("/create-task", status_code=201)
 async def create_tasks(body: TaskCreateBatchRequest):
     """
@@ -55,9 +58,7 @@ async def create_tasks(body: TaskCreateBatchRequest):
       { "task_id": <batch_id>, "file_tasks": { "a.pdf": <id>, ... } }
     """
     try:
-        # If a list of files is provided, create a parent batch and child tasks
         if body.files and len(body.files) > 0:
-            # create batch task
             batch_id = task_store.create_task(
                 task_type=body.task_type,
                 filename=body.filename,
@@ -73,7 +74,6 @@ async def create_tasks(body: TaskCreateBatchRequest):
                 )
                 file_task_map[fname] = file_task_id
 
-            # persist mapping in batch details for easy reconciliation
             task_store.update_task(batch_id, details={
                 **(body.details or {}),
                 "files": body.files,
@@ -82,7 +82,6 @@ async def create_tasks(body: TaskCreateBatchRequest):
 
             return {"task_id": batch_id, "file_tasks": file_task_map}
 
-        # Otherwise create a single task
         single_id = task_store.create_task(
             task_type=body.task_type,
             filename=body.filename,
@@ -95,17 +94,13 @@ async def create_tasks(body: TaskCreateBatchRequest):
 # New endpoints to query tasks
 @router.get("/tasks")
 async def list_tasks(status: Optional[str] = Query(None), limit: int = Query(100)):
-    """
-    List tasks. Optional filter by status.
-    """
+    """List tasks. Optional filter by status."""
     tasks = task_store.list_tasks(status=status, limit=limit)
     return {"tasks": tasks}
 
 @router.get("/tasks/{task_id}")
 async def get_task(task_id: int):
-    """
-    Get task by id.
-    """
+    """Get task by id."""
     try:
         task = task_store.get_task(task_id)
         return {"task": task}
@@ -220,68 +215,66 @@ async def process_folder(request: Request, files: List[UploadFile] = File(...)):
         raise
 
 @router.post("/batch-ocr")
-async def batch_ocr(ocrreq: Request, files: List[UploadFile] = File(...)):
-    """
-    Run OCR on multiple uploaded files and return only the extracted text.
-    """
-    model = ocrreq.app.state.get_ocr_model()
-    
-    # create a batch task
+async def batch_ocr(request: Request, files: List[UploadFile] = File(...)):
+    """Run OCR on multiple uploaded files using TrOCR."""
     batch_task_id = task_store.create_task("batch_ocr", filename=None, details={"file_count": len(files)})
-    # mark batch as started
     task_store.update_task(batch_task_id, status="running", details={"started_by": "api"})
     
     results = []
-    total = len(files)
-    for idx, file in enumerate(files, start=1):
-        file_task_id = task_store.create_task("ocr_file", filename=file.filename, details={"batch_id": batch_task_id, "index": idx})
-        try:
-            update_processing_status(file.filename, "processing")
-            # set file task to processing
-            task_store.update_task(file_task_id, status="processing", progress=0.0)
-            # Await the async OCR function
-            ocr_result = await run_ocr(model, file)
+    
+    # Get TrOCR model
+    trocr_printed = request.app.state.get_trocr_printed()
+    
+    try:
+        for idx, file in enumerate(files, 1):
+            file_task_id = task_store.create_task(
+                "ocr_file", 
+                filename=file.filename, 
+                details={"batch_id": batch_task_id, "index": idx}
+            )
             
-            # Extract only text from OCR result
-            extracted_text = ""
-            for page in ocr_result["pages"]:
-                page_text = []
-                for block in page["blocks"]:
-                    for line in block["lines"]:
-                        line_text = " ".join(str(word["value"]) for word in line["words"])
-                        page_text.append(line_text)
-                extracted_text += "\n".join(page_text) + "\n"
+            try:
+                content = await file.read()
+                image = Image.open(io.BytesIO(content)).convert('RGB')
+                img_array = np.array(image)
                 
-             # mark file task done
-            task_store.update_task(file_task_id, status="completed", progress=1.0, details={"text_snippet": extracted_text[:300]})
-            # update batch progress
-            task_store.update_task(batch_task_id, progress=float(idx) / total)
-            update_processing_status(file.filename, "completed")
-            results.append({
-                "filename": file.filename,
-                "text": extracted_text.strip()
-            })
-        except Exception as e:
-            task_store.update_task(file_task_id, status="error", details={"error": str(e)})
-            update_processing_status(file.filename, "error", str(e))
-            results.append({
-                "filename": file.filename,
-                "error": str(e)
-            })
-    # finish batch
+                # Preprocess
+                if len(img_array.shape) == 3:
+                    gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+                else:
+                    gray = img_array
+                
+                denoised = cv2.fastNlMeansDenoising(gray)
+                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+                contrast = clahe.apply(denoised)
+                preprocessed = Image.fromarray(contrast).convert('RGB')
+                
+                # Run TrOCR
+                trocr_result = await asyncio.to_thread(trocr_printed, preprocessed)
+                extracted_text = trocr_result[0]['generated_text'] if trocr_result else ""
+                
+                task_store.update_task(
+                    file_task_id, 
+                    status="completed", 
+                    progress=1.0, 
+                    details={"text_snippet": extracted_text[:300]}
+                )
+                update_processing_status(file.filename, "completed")
+                results.append({"filename": file.filename, "text": extracted_text.strip()})
+                
+            except Exception as e:
+                task_store.update_task(file_task_id, status="error", details={"error": str(e)})
+                update_processing_status(file.filename, "error", str(e))
+                results.append({"filename": file.filename, "error": str(e)})
+            
+            task_store.update_task(batch_task_id, progress=float(idx) / len(files))
+    
+    except Exception as e:
+        task_store.update_task(batch_task_id, status="error", details={"error": str(e)})
+        raise
+    
     task_store.update_task(batch_task_id, status="completed", progress=1.0)
     return {"results": results}
-
-@router.post("/collect-all-pages")
-def collect_all_pages_endpoint(ocrreq:Request, file_path: str = Query(..., description="Path to image or PDF file")):
-    pages = collect_all_pages(file_path, ocrreq)
-    # Remove image objects from response for JSON serialization
-    for page in pages:
-        if "image" in page:
-            page["image"] = "Image data omitted"
-    return {"pages": pages}
-
-# ...existing code...
 
 @router.post("/extract-full")
 async def extract_text_full(file: UploadFile, ocrreq: Request):
@@ -292,10 +285,17 @@ async def extract_text_full(file: UploadFile, ocrreq: Request):
     
     try:
         task_store.update_task(task_id, status="processing")
-        model = ocrreq.app.state.get_ocr_model()
+        trocr_printed = ocrreq.app.state.get_trocr_printed()
         content = await file.read()
-        # Normalize input (pdf/docx/image bytes) into the DocumentFile/exported dict
-        doc, exported = extract_on_document(content, model)
+        
+        doc, exported = extract_on_document(content, trocr_printed)
+        
+        # If doc is a PIL Image, run TrOCR on it
+        if isinstance(doc, Image.Image):
+            trocr_result = await asyncio.to_thread(trocr_printed, doc)
+            extracted_text = trocr_result[0]['generated_text'] if trocr_result else ""
+            exported["pages"] = [{"text": extracted_text}]
+        
         task_store.update_task(
             task_id, 
             status="completed",

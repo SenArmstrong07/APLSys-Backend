@@ -20,6 +20,10 @@ env/
 *.iml
 
 
+#specific files
+utils/modal_client.py
+utils/modal_ocr.py
+
 # OS
 .DS_Store
 Thumbs.db
