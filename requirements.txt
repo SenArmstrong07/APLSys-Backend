@@ -1,5 +1,4 @@
 python-doctr[viz,html,contrib]
-modal
 fastapi
 certifi
 uvicorn

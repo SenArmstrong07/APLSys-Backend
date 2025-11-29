@@ -315,7 +315,7 @@ async def extract_text_region(ocrreq: Request, file: UploadFile = File(...)):
     
     try:
         task_store.update_task(task_id, status="processing")
-        model = ocrreq.app.state.get_ocr_model()
+        model = ocrreq.app.state.get_trocr_printed()
         content = await file.read()
         
         # Normalize bytes/path into exported OCR structure (dict with "pages")
