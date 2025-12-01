@@ -18,6 +18,8 @@ from utils.json_encoder import convert_numpy_types
 from typing import Dict, Any, Union, List, Optional
 import asyncio
 import numpy as np
+import importlib
+import gc
 
 load_dotenv()
 
@@ -339,3 +341,35 @@ def load_ocr_layer(json_path):
     """Load the OCR layer from a JSON file."""
     with open(json_path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+def create_doctr_ocr():
+    """
+    Dynamically import and instantiate a Doctr OCR predictor.
+    This avoids importing doctr at startup; import and model instantiation
+    happen only when this function is called (i.e. inside an AI request).
+    """
+    print("Loading Doctr OCR predictor (on-demand)...")
+    # import doctr lazily
+    doctr_models = importlib.import_module("doctr.models")
+    # common API: ocr_predictor(pretrained=True)
+    predictor = doctr_models.ocr_predictor(pretrained=True)
+    return predictor
+
+def dispose_doctr_ocr(predictor):
+    """
+    Dispose of the predictor to free memory. Attempts to release GPU memory
+    if torch is available.
+    """
+    try:
+        # remove references and run GC
+        del predictor
+    except Exception:
+        pass
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        # Torch not installed or other issue; ignore
+        pass

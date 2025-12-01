@@ -1,5 +1,5 @@
 # app/routers/ocr_router.py
-from fastapi import APIRouter, UploadFile, File, Query, Request, HTTPException
+from fastapi import APIRouter, UploadFile, File, Query, Request, HTTPException, Depends
 from services.ocr_service import (
     run_ocr,
     extract_on_document,
@@ -11,7 +11,9 @@ from services.ocr_service import (
     save_pdf_images,           
     pdf_to_images_b64,
     get_processing_status,
-    update_processing_status
+    update_processing_status,
+    create_doctr_ocr,
+    dispose_doctr_ocr
 )
 from utils.task_store import TaskStore
 from typing import Optional
@@ -26,8 +28,23 @@ from typing import List, Dict, Any
 from model.request_schema import SearchRequest, TaskCreateRequest, TaskCreateBatchRequest
 import asyncio
 
-router = APIRouter()
 task_store = TaskStore()
+
+async def get_doctr_dependency():
+    """
+    FastAPI dependency that creates a doctr predictor for the lifetime of
+    an OCR request and disposes it after processing to save memory.
+    Attach this dependency at the router-level so all OCR endpoints get a fresh
+    predictor only while handling the request.
+    """
+    predictor = create_doctr_ocr()
+    try:
+        yield predictor
+    finally:
+        dispose_doctr_ocr(predictor)
+        
+
+router = APIRouter(dependencies=[Depends(get_doctr_dependency)])
 
 @router.get("/status")
 async def get_ocr_status():

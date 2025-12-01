@@ -82,6 +82,10 @@ app.state.get_ner_resume_pipeline_basic = get_ner_pipeline_basic
 app.state.get_ner_resume_pipeline_semantic = get_ner_pipeline_semantic
 app.state.get_general_ner_pipeline = get_ner_pipeline_general
 
+# Note: OCR is no longer preloaded here. Doctr OCR will be created lazily
+# only when an AI request arrives and will be torn down after that request.
+# See services.ocr_service.create_doctr_ocr and api.routes_ai.get_doctr_dependency
+
 # Register API routes
 app.include_router(routes_ocr.router, prefix="/ocr", tags=["OCR"])
 app.include_router(routes_ai.router, prefix="/ai", tags=["AI"])
