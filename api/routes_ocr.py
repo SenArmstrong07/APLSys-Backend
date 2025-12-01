@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import List, Dict, Any
 from model.request_schema import SearchRequest, TaskCreateRequest, TaskCreateBatchRequest
 import asyncio
+import tempfile
 
 task_store = TaskStore()
 
@@ -308,6 +309,7 @@ async def extract_text_full(file: UploadFile, ocrreq: Request):
         filename=file.filename
     )
     
+    temp_path = None
     try:
         task_store.update_task(task_id, status="processing")
         # use Doctr predictor from request.state
@@ -322,9 +324,14 @@ async def extract_text_full(file: UploadFile, ocrreq: Request):
                 raise HTTPException(status_code=500, detail="OCR predictor not available")
             import importlib
             doctr_io = importlib.import_module("doctr.io")
-            # Convert PIL Image to numpy array for DocTR
-            doc_array = np.array(doc)
-            doc_file = doctr_io.DocumentFile.from_images([doc_array])
+            
+            # Save PIL Image to temporary file (DocTR expects file paths, not arrays)
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                temp_path = tmp.name
+                doc.save(temp_path)
+            
+            # Pass file path to DocumentFile.from_images
+            doc_file = doctr_io.DocumentFile.from_images([temp_path])
             result = await asyncio.to_thread(predictor, doc_file)
             exported = result.export()
         
@@ -337,6 +344,13 @@ async def extract_text_full(file: UploadFile, ocrreq: Request):
     except Exception as e:
         task_store.update_task(task_id, status="error", details={"error": str(e)})
         raise
+    finally:
+        # Clean up temporary file
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
 
 @router.post("/extract-region")
 async def extract_text_region(ocrreq: Request, file: UploadFile = File(...)):
@@ -345,6 +359,7 @@ async def extract_text_region(ocrreq: Request, file: UploadFile = File(...)):
         filename=file.filename
     )
     
+    temp_path = None
     try:
         task_store.update_task(task_id, status="processing")
         # use Doctr predictor from request.state
@@ -360,9 +375,14 @@ async def extract_text_region(ocrreq: Request, file: UploadFile = File(...)):
                 raise HTTPException(status_code=500, detail="OCR predictor not available")
             import importlib
             doctr_io = importlib.import_module("doctr.io")
-            # Convert PIL Image to numpy array for DocTR
-            doc_array = np.array(doc)
-            doc_file = doctr_io.DocumentFile.from_images([doc_array])
+            
+            # Save PIL Image to temporary file (DocTR expects file paths, not arrays)
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                temp_path = tmp.name
+                doc.save(temp_path)
+            
+            # Pass file path to DocumentFile.from_images
+            doc_file = doctr_io.DocumentFile.from_images([temp_path])
             ocr_result = await asyncio.to_thread(predictor, doc_file)
             result = ocr_result.export()
 
@@ -407,6 +427,13 @@ async def extract_text_region(ocrreq: Request, file: UploadFile = File(...)):
     except Exception as e:
         task_store.update_task(task_id, status="error", details={"error": str(e)})
         raise
+    finally:
+        # Clean up temporary file
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
 
 @router.post("/extract-metadata")
 async def extract_metadata_from_image(ocrreq: Request, file: UploadFile = File(...)):
