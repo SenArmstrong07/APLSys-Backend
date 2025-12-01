@@ -349,10 +349,14 @@ def create_doctr_ocr():
     happen only when this function is called (i.e. inside an AI request).
     """
     print("Loading Doctr OCR predictor (on-demand)...")
+    doctr_loaded = False
     # import doctr lazily
     doctr_models = importlib.import_module("doctr.models")
     # common API: ocr_predictor(pretrained=True)
     predictor = doctr_models.ocr_predictor(pretrained=True)
+    if (predictor is not None):
+        doctr_loaded = True
+    print("Doctr OCR predictor loaded:" + str(doctr_loaded))
     return predictor
 
 def dispose_doctr_ocr(predictor):
@@ -366,6 +370,7 @@ def dispose_doctr_ocr(predictor):
     except Exception:
         pass
     gc.collect()
+    print("Disposed Doctr OCR predictor and ran garbage collection.")
     try:
         import torch
         if torch.cuda.is_available():

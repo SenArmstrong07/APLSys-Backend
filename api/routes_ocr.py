@@ -30,7 +30,7 @@ import asyncio
 
 task_store = TaskStore()
 
-async def get_doctr_dependency():
+async def get_doctr_dependency(request: Request):
     """
     FastAPI dependency that creates a doctr predictor for the lifetime of
     an OCR request and disposes it after processing to save memory.
@@ -38,10 +38,18 @@ async def get_doctr_dependency():
     predictor only while handling the request.
     """
     predictor = create_doctr_ocr()
+    # attach to request.state so handlers can access it
+    request.state.doctr_predictor = predictor
     try:
         yield predictor
     finally:
-        dispose_doctr_ocr(predictor)
+        try:
+            dispose_doctr_ocr(predictor)
+        finally:
+            # ensure it's removed from request state
+            if hasattr(request.state, "doctr_predictor"):
+                del request.state.doctr_predictor
+                print("Disposed Doctr OCR predictor after request.")
         
 
 router = APIRouter(dependencies=[Depends(get_doctr_dependency)])
@@ -302,16 +310,21 @@ async def extract_text_full(file: UploadFile, ocrreq: Request):
     
     try:
         task_store.update_task(task_id, status="processing")
-        trocr_printed = ocrreq.app.state.get_trocr_printed()
+        # use Doctr predictor from request.state
+        predictor = getattr(ocrreq.state, "doctr_predictor", None)
         content = await file.read()
         
-        doc, exported = extract_on_document(content, trocr_printed)
+        doc, exported = extract_on_document(content, predictor)
         
-        # If doc is a PIL Image, run TrOCR on it
+        # If doc is a PIL Image, run Doctr predictor on it
         if isinstance(doc, Image.Image):
-            trocr_result = await asyncio.to_thread(trocr_printed, doc)
-            extracted_text = trocr_result[0]['generated_text'] if trocr_result else ""
-            exported["pages"] = [{"text": extracted_text}]
+            if predictor is None:
+                raise HTTPException(status_code=500, detail="OCR predictor not available")
+            import importlib
+            doctr_io = importlib.import_module("doctr.io")
+            doc_file = doctr_io.DocumentFile.from_images([doc])
+            result = await asyncio.to_thread(predictor, doc_file)
+            exported = result.export()
         
         task_store.update_task(
             task_id, 
@@ -332,11 +345,22 @@ async def extract_text_region(ocrreq: Request, file: UploadFile = File(...)):
     
     try:
         task_store.update_task(task_id, status="processing")
-        model = ocrreq.app.state.get_trocr_printed()
+        # use Doctr predictor from request.state
+        predictor = getattr(ocrreq.state, "doctr_predictor", None)
         content = await file.read()
         
         # Normalize bytes/path into exported OCR structure (dict with "pages")
-        doc, result = extract_on_document(content, model)
+        doc, result = extract_on_document(content, predictor)
+
+        # If extract_on_document returned a PIL image, run Doctr predictor
+        if isinstance(doc, Image.Image):
+            if predictor is None:
+                raise HTTPException(status_code=500, detail="OCR predictor not available")
+            import importlib
+            doctr_io = importlib.import_module("doctr.io")
+            doc_file = doctr_io.DocumentFile.from_images([doc])
+            ocr_result = await asyncio.to_thread(predictor, doc_file)
+            result = ocr_result.export()
 
         text = []
         confidences = []
