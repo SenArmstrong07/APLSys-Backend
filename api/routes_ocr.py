@@ -322,7 +322,9 @@ async def extract_text_full(file: UploadFile, ocrreq: Request):
                 raise HTTPException(status_code=500, detail="OCR predictor not available")
             import importlib
             doctr_io = importlib.import_module("doctr.io")
-            doc_file = doctr_io.DocumentFile.from_images([doc])
+            # Convert PIL Image to numpy array for DocTR
+            doc_array = np.array(doc)
+            doc_file = doctr_io.DocumentFile.from_images([doc_array])
             result = await asyncio.to_thread(predictor, doc_file)
             exported = result.export()
         
@@ -358,7 +360,9 @@ async def extract_text_region(ocrreq: Request, file: UploadFile = File(...)):
                 raise HTTPException(status_code=500, detail="OCR predictor not available")
             import importlib
             doctr_io = importlib.import_module("doctr.io")
-            doc_file = doctr_io.DocumentFile.from_images([doc])
+            # Convert PIL Image to numpy array for DocTR
+            doc_array = np.array(doc)
+            doc_file = doctr_io.DocumentFile.from_images([doc_array])
             ocr_result = await asyncio.to_thread(predictor, doc_file)
             result = ocr_result.export()
 
@@ -385,7 +389,6 @@ async def extract_text_region(ocrreq: Request, file: UploadFile = File(...)):
                     for word in words_sorted:
                         if "confidence" in word and word["confidence"] is not None:
                             confidences.append(word["confidence"])
-        
         
         avg_conf = float(sum(confidences) / len(confidences)) if confidences else 0.0
         task_store.update_task(
