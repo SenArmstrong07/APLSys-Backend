@@ -53,7 +53,7 @@ async def get_doctr_dependency(request: Request):
                 print("Disposed Doctr OCR predictor after request.")
         
 
-router = APIRouter(dependencies=[Depends(get_doctr_dependency)])
+router = APIRouter()
 
 @router.get("/status")
 async def get_ocr_status():
@@ -202,8 +202,8 @@ async def search_word_endpoint(request: SearchRequest, ocrreq: Request):
     return {"matches": matches}
 
 @router.post("/process-folder")
-async def process_folder(request: Request, files: List[UploadFile] = File(...)):
-    """Process multiple documents with progress tracking."""
+async def process_folder(request: Request, files: List[UploadFile] = File(...), _: None = Depends(get_doctr_dependency)):
+    """Process multiple documents with progress tracking using Doctr."""
     batch_task_id = task_store.create_task(
         task_type="batch_folder_process",
         details={"file_count": len(files)}
@@ -211,28 +211,90 @@ async def process_folder(request: Request, files: List[UploadFile] = File(...)):
     
     try:
         task_store.update_task(batch_task_id, status="processing")
-        ocr_results = await batch_ocr(request, files)
+        # Get Doctr predictor from request.state (created by dependency)
+        predictor = getattr(request.state, "doctr_predictor", None)
+        if predictor is None:
+            raise HTTPException(status_code=500, detail="Doctr OCR predictor not available")
         
         processed_results = []
-        for idx, item in enumerate(ocr_results["results"], 1):
-            if "error" in item:
+        for idx, file in enumerate(files, 1):
+            file_task_id = task_store.create_task(
+                task_type="folder_process_file",
+                filename=file.filename,
+                details={"batch_id": batch_task_id, "index": idx}
+            )
+            
+            try:
+                task_store.update_task(file_task_id, status="processing")
+                content = await file.read()
+                
+                # Use Doctr predictor via extract_on_document
+                doc, exported = extract_on_document(content, predictor)
+                
+                # If doc is a PIL Image, run Doctr predictor on it
+                temp_path = None
+                if isinstance(doc, Image.Image):
+                    import importlib
+                    doctr_io = importlib.import_module("doctr.io")
+                    
+                    # Save PIL Image to temporary file
+                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                        temp_path = tmp.name
+                        doc.save(temp_path)
+                    
+                    # Run Doctr predictor
+                    doc_file = doctr_io.DocumentFile.from_images([temp_path])
+                    result = await asyncio.to_thread(predictor, doc_file)
+                    exported = result.export()
+                
+                # Extract text from exported OCR result
+                text = []
+                for page in exported.get("pages", []):
+                    for block in page.get("blocks", []):
+                        if not isinstance(block, dict):
+                            continue
+                        for line in block.get("lines", []):
+                            words = line.get("words", []) or []
+                            line_text = " ".join([w.get("value", "") for w in words]).strip()
+                            if line_text:
+                                text.append(line_text)
+                
+                plain_text = "\n".join(text)
+                
+                task_store.update_task(
+                    file_task_id,
+                    status="completed",
+                    progress=1.0,
+                    details={"text_length": len(plain_text)}
+                )
                 processed_results.append({
-                    "filename": item["filename"],
-                    "status": "error",
-                    "error": item["error"]
-                })
-            else:
-                processed_results.append({
-                    "filename": item["filename"],
+                    "filename": file.filename,
                     "status": "success",
-                    "text": item["text"]
+                    "text": plain_text
                 })
+                
+            except Exception as e:
+                task_store.update_task(file_task_id, status="error", details={"error": str(e)})
+                processed_results.append({
+                    "filename": file.filename,
+                    "status": "error",
+                    "error": str(e)
+                })
+            finally:
+                # Clean up temp file
+                if "temp_path" in locals() and temp_path and os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except Exception:
+                        pass
+            
             # Update batch progress
-            task_store.update_task(batch_task_id, progress=idx/len(files))
+            task_store.update_task(batch_task_id, progress=idx / len(files))
         
         task_store.update_task(
-            batch_task_id, 
+            batch_task_id,
             status="completed",
+            progress=1.0,
             details={"processed_count": len(processed_results)}
         )
         return {"results": processed_results, "task_id": batch_task_id}
@@ -241,48 +303,68 @@ async def process_folder(request: Request, files: List[UploadFile] = File(...)):
         raise
 
 @router.post("/batch-ocr")
-async def batch_ocr(request: Request, files: List[UploadFile] = File(...)):
-    """Run OCR on multiple uploaded files using TrOCR."""
+async def batch_ocr(request: Request, files: List[UploadFile] = File(...), _: None = Depends(get_doctr_dependency)):
+    """Run OCR on multiple uploaded files using Doctr."""
     batch_task_id = task_store.create_task("batch_ocr", filename=None, details={"file_count": len(files)})
     task_store.update_task(batch_task_id, status="running", details={"started_by": "api"})
     
     results = []
     
-    # Get TrOCR model
-    trocr_printed = request.app.state.get_trocr_printed()
+    # Get Doctr predictor from request.state (created by dependency)
+    predictor = getattr(request.state, "doctr_predictor", None)
+    if predictor is None:
+        task_store.update_task(batch_task_id, status="error", details={"error": "Doctr OCR predictor not available"})
+        raise HTTPException(status_code=500, detail="Doctr OCR predictor not available")
     
     try:
         for idx, file in enumerate(files, 1):
             file_task_id = task_store.create_task(
-                "ocr_file", 
-                filename=file.filename, 
+                "ocr_file",
+                filename=file.filename,
                 details={"batch_id": batch_task_id, "index": idx}
             )
             
+            temp_path = None
             try:
+                task_store.update_task(file_task_id, status="processing")
                 content = await file.read()
-                image = Image.open(io.BytesIO(content)).convert('RGB')
-                img_array = np.array(image)
                 
-                # Preprocess
-                if len(img_array.shape) == 3:
-                    gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-                else:
-                    gray = img_array
+                # Use Doctr predictor via extract_on_document
+                doc, exported = extract_on_document(content, predictor)
                 
-                denoised = cv2.fastNlMeansDenoising(gray)
-                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-                contrast = clahe.apply(denoised)
-                preprocessed = Image.fromarray(contrast).convert('RGB')
+                # If doc is a PIL Image, run Doctr predictor on it
+                if isinstance(doc, Image.Image):
+                    import importlib
+                    doctr_io = importlib.import_module("doctr.io")
+                    
+                    # Save PIL Image to temporary file
+                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                        temp_path = tmp.name
+                        doc.save(temp_path)
+                    
+                    # Run Doctr predictor
+                    doc_file = doctr_io.DocumentFile.from_images([temp_path])
+                    result = await asyncio.to_thread(predictor, doc_file)
+                    exported = result.export()
                 
-                # Run TrOCR
-                trocr_result = await asyncio.to_thread(trocr_printed, preprocessed)
-                extracted_text = trocr_result[0]['generated_text'] if trocr_result else ""
+                # Extract text from exported OCR result
+                text = []
+                for page in exported.get("pages", []):
+                    for block in page.get("blocks", []):
+                        if not isinstance(block, dict):
+                            continue
+                        for line in block.get("lines", []):
+                            words = line.get("words", []) or []
+                            line_text = " ".join([w.get("value", "") for w in words]).strip()
+                            if line_text:
+                                text.append(line_text)
+                
+                extracted_text = "\n".join(text)
                 
                 task_store.update_task(
-                    file_task_id, 
-                    status="completed", 
-                    progress=1.0, 
+                    file_task_id,
+                    status="completed",
+                    progress=1.0,
                     details={"text_snippet": extracted_text[:300]}
                 )
                 update_processing_status(file.filename, "completed")
@@ -292,6 +374,13 @@ async def batch_ocr(request: Request, files: List[UploadFile] = File(...)):
                 task_store.update_task(file_task_id, status="error", details={"error": str(e)})
                 update_processing_status(file.filename, "error", str(e))
                 results.append({"filename": file.filename, "error": str(e)})
+            finally:
+                # Clean up temp file
+                if temp_path and os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except Exception:
+                        pass
             
             task_store.update_task(batch_task_id, progress=float(idx) / len(files))
     
@@ -303,7 +392,7 @@ async def batch_ocr(request: Request, files: List[UploadFile] = File(...)):
     return {"results": results}
 
 @router.post("/extract-full")
-async def extract_text_full(file: UploadFile, ocrreq: Request):
+async def extract_text_full(file: UploadFile, ocrreq: Request, _: None = Depends(get_doctr_dependency)):
     task_id = task_store.create_task(
         task_type="extract_full",
         filename=file.filename
@@ -353,7 +442,7 @@ async def extract_text_full(file: UploadFile, ocrreq: Request):
                 pass
 
 @router.post("/extract-region")
-async def extract_text_region(ocrreq: Request, file: UploadFile = File(...)):
+async def extract_text_region(ocrreq: Request, file: UploadFile = File(...), _: None = Depends(get_doctr_dependency)):
     task_id = task_store.create_task(
         task_type="extract_region",
         filename=file.filename
