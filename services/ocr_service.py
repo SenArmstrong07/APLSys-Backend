@@ -85,6 +85,23 @@ def _preprocess_image_for_trocr(img_array: np.ndarray) -> Image.Image:
     pil_img = Image.fromarray(contrast).convert('RGB')
     return pil_img
 
+def _preprocess_image_for_doctr(img_array: np.ndarray) -> Image.Image:
+    """
+    Minimal preprocessing for DocTR: just convert to RGB PIL.
+    DocTR has its own internal normalization; heavy preprocessing degrades performance.
+    """
+    # If grayscale, convert to RGB (DocTR expects 3 channels)
+    if len(img_array.shape) == 2:
+        # grayscale -> RGB
+        img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
+    elif len(img_array.shape) == 3 and img_array.shape[2] == 4:
+        # RGBA -> RGB
+        img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2RGB)
+    
+    # Convert to PIL (no contrast/denoise — let DocTR handle it)
+    pil_img = Image.fromarray(img_array).convert('RGB')
+    return pil_img
+
 async def run_ocr(trocr_printed, file) -> Dict[str, Any]:
     """Run OCR using TrOCR model"""
     filename = getattr(file, 'filename', 'unknown')
@@ -97,7 +114,7 @@ async def run_ocr(trocr_printed, file) -> Dict[str, Any]:
         image = Image.open(io.BytesIO(content)).convert('RGB')
         img_array = np.array(image)
         
-        preprocessed = _preprocess_image_for_trocr(img_array)
+        preprocessed = _preprocess_image_for_doctr(img_array)
         
         # Run TrOCR inference
         result = await asyncio.to_thread(trocr_printed, preprocessed)
@@ -246,7 +263,7 @@ def extract_on_document(file, model):
             # Not a PDF or docx, treat as image
             image = Image.open(io.BytesIO(file)).convert('RGB')
             img_array = np.array(image)
-            preprocessed = _preprocess_image_for_trocr(img_array)
+            preprocessed = _preprocess_image_for_doctr(img_array)
             
             # Return preprocessed PIL image for OCR
             return preprocessed, {"pages": []}
@@ -275,14 +292,14 @@ def extract_on_document(file, model):
             # File path to image
             image = Image.open(file).convert('RGB')
             img_array = np.array(image)
-            preprocessed = _preprocess_image_for_trocr(img_array)
+            preprocessed = _preprocess_image_for_doctr(img_array)
             return preprocessed, {"pages": []}
 
     # Fallback
     try:
         image = Image.open(file).convert('RGB')
         img_array = np.array(image)
-        preprocessed = _preprocess_image_for_trocr(img_array)
+        preprocessed = _preprocess_image_for_doctr(img_array)
         return preprocessed, {"pages": []}
     except Exception as e:
         raise ValueError(f"Unsupported file type or failed to process document: {e}")
