@@ -258,10 +258,13 @@ def extract_on_document(file, model):
         try:
             # Use pdf2image to convert PDF pages to images for Doctr OCR
             pages_images = convert_from_bytes(file, dpi=300)
-            if pages_images:
-                # Return first page as PIL Image for OCR; could loop over all pages
-                return pages_images[0], {"pages": []}
-        except Exception:
+            if pages_images and len(pages_images) > 0:
+                # Return first page as PIL Image for OCR
+                first_page = pages_images[0]
+                if isinstance(first_page, Image.Image):
+                    return first_page, {"pages": []}
+        except Exception as e:
+            print(f"PDF conversion failed: {e}")
             pass
 
         # Not a PDF or docx, treat as image
@@ -290,6 +293,15 @@ def extract_on_document(file, model):
             full_text = "\n\n".join(filter(None, paragraphs + table_texts))
             return None, {"pages": [{"text": full_text}]}
         elif lower.endswith(".pdf"):
+            try:
+                # Try PDF image conversion first
+                pages_images = convert_from_bytes(open(file, 'rb').read(), dpi=300)
+                if pages_images and len(pages_images) > 0 and isinstance(pages_images[0], Image.Image):
+                    return pages_images[0], {"pages": []}
+            except Exception:
+                pass
+            
+            # Fallback to text extraction
             reader = PdfReader(file)
             text = "\n".join([page.extract_text() or "" for page in reader.pages])
             return None, {"pages": [{"text": text}]}
