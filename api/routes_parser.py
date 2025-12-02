@@ -1,4 +1,4 @@
-from fastapi import APIRouter, UploadFile, File, Query, Request
+from fastapi import APIRouter, UploadFile, File, Query, Request, Depends
 import pandas as pd
 import os
 from doctr.io import DocumentFile
@@ -13,9 +13,28 @@ from services.parsing_service import (
 from utils.task_store import TaskStore
 from model.request_schema import DocumentParseRequest, ResumeTextRequest
 from typing import Optional
+from services.ocr_service import create_doctr_ocr, dispose_doctr_ocr
 
 router = APIRouter()
 task_store = TaskStore()
+
+# Reuse the doctr dependency from routes_ocr
+async def get_doctr_dependency(request: Request):
+    """
+    FastAPI dependency that creates a doctr predictor for the lifetime of
+    a parser request and disposes it after processing to save memory.
+    """
+    predictor = create_doctr_ocr()
+    request.state.doctr_predictor = predictor
+    try:
+        yield predictor
+    finally:
+        try:
+            dispose_doctr_ocr(predictor)
+        finally:
+            if hasattr(request.state, "doctr_predictor"):
+                del request.state.doctr_predictor
+                print("Disposed Doctr OCR predictor after parser request.")
 
 @router.get("/tasks")
 async def get_tasks(status: Optional[str] = Query(None), limit: int = Query(100)):
@@ -162,13 +181,14 @@ async def export_csv(
             os.remove(temp_path)
 
 @router.post("/extract-resume-text")
-async def extract_resume_txt(request: Request, file: UploadFile = File(...)):
+async def extract_resume_txt(request: Request, file: UploadFile = File(...), _: None = Depends(get_doctr_dependency)):
     task_id = task_store.create_task(
         task_type="resume_extract",
         filename=file.filename
     )
     
-    ocr_model = request.app.state.ocr_model
+    # Get Doctr predictor from request.state (created by dependency)
+    ocr_model = getattr(request.state, "doctr_predictor", None)
     
     temp_path = None
     try:
