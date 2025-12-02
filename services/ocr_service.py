@@ -386,8 +386,18 @@ def create_doctr_ocr():
     doctr_loaded = False
     # import doctr lazily
     doctr_models = importlib.import_module("doctr.models")
+    
+    # Load specific detector + recognizer
+    detector = doctr_models.db_mobilenet_v3_large(pretrained=True)
+    recognizer = doctr_models.crnn_vgg16_bn(pretrained=True)  
+    
     # common API: ocr_predictor(pretrained=True)
-    predictor = doctr_models.ocr_predictor(pretrained=True)
+    predictor = doctr_models.ocr_predictor(
+        det_arch=detector,
+        reco_arch=recognizer,
+        pretrained=True,
+        assume_straight_pages=True,
+    )
     if (predictor is not None):
         doctr_loaded = True
     print("Doctr OCR predictor loaded:" + str(doctr_loaded))
