@@ -232,7 +232,7 @@ def extract_on_document(file, model):
       - bytes (uploaded content)
       - file path string (pdf, docx, image)
     Returns:
-      - (doc, exported) where doc is None (TrOCR doesn't use DocumentFile)
+      - (doc, exported) where doc is PIL Image for DocTR, or None for text
       - exported is a dict with "pages": [...] structure
     """
     # If file is bytes (uploaded file content)
@@ -254,19 +254,24 @@ def extract_on_document(file, model):
         except Exception:
             pass
 
-        # Try to read as PDF
+        # Try to read as PDF — convert to images for OCR
         try:
-            reader = PdfReader(io.BytesIO(file))
-            text = "\n".join([page.extract_text() or "" for page in reader.pages])
-            return None, {"pages": [{"text": text}]}
+            # Use pdf2image to convert PDF pages to images for Doctr OCR
+            pages_images = convert_from_bytes(file, dpi=300)
+            if pages_images:
+                # Return first page as PIL Image for OCR; could loop over all pages
+                return pages_images[0], {"pages": []}
         except Exception:
-            # Not a PDF or docx, treat as image
+            pass
+
+        # Not a PDF or docx, treat as image
+        try:
             image = Image.open(io.BytesIO(file)).convert('RGB')
             img_array = np.array(image)
             preprocessed = _preprocess_image_for_doctr(img_array)
-            
-            # Return preprocessed PIL image for OCR
             return preprocessed, {"pages": []}
+        except Exception as e:
+            raise ValueError(f"Unsupported file type or failed to process document: {e}")
 
     # If file is a path string
     elif isinstance(file, str):
