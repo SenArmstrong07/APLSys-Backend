@@ -20,6 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openjdk-21-jre-headless \
     build-essential \
     ca-certificates \
+    poppler-utils \
  && rm -rf /var/lib/apt/lists/*
 
 # Set working directory

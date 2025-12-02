@@ -9,3 +9,4 @@ ghostscript
 libxml2
 libxslt1.1
 openjdk-11-jre
+poppler-utils
