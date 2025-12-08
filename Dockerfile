@@ -26,7 +26,7 @@ COPY . .
 
 # Expose port (Railway uses PORT environment variable automatically)
 ENV PYTHONHASHSEED=random
-ENV PORT=8000
+ENV PORT=8080
 
 # Start FastAPI app with Uvicorn
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--timeout-keep-alive", "5"]
