@@ -5,8 +5,8 @@ from doctr.io import DocumentFile
 import fitz
 from services.parsing_service import (
     extract_tables_from_pdf,
-    extract_tables_from_pdf_with_camelot,
-    extract_tables_from_docx_with_camelot,
+    #extract_tables_from_pdf_with_camelot,
+    #extract_tables_from_docx_with_camelot,
     export_tables_to_csv,
     parse_document_text,
 )
@@ -87,98 +87,98 @@ async def tabula_extract(file: UploadFile = File(...), pages: Optional[str] = Qu
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
-@router.post("/camelot_extract")
-async def camelot_extract(file: UploadFile = File(...), pages: Optional[str] = Query("all")):
-    task_id = task_store.create_task(
-        task_type="camelot_extract",
-        filename=file.filename,
-        details={"pages": pages}
-    )
+# @router.post("/camelot_extract")
+# async def camelot_extract(file: UploadFile = File(...), pages: Optional[str] = Query("all")):
+#     task_id = task_store.create_task(
+#         task_type="camelot_extract",
+#         filename=file.filename,
+#         details={"pages": pages}
+#     )
     
-    temp_path = f"temp_{file.filename}"
-    try:
-        task_store.update_task(task_id, status="processing")
-        with open(temp_path, "wb") as f:
-            f.write(await file.read())
+#     temp_path = f"temp_{file.filename}"
+#     try:
+#         task_store.update_task(task_id, status="processing")
+#         with open(temp_path, "wb") as f:
+#             f.write(await file.read())
             
-        _, ext = os.path.splitext(temp_path)
-        ext = ext.lower()
+#         _, ext = os.path.splitext(temp_path)
+#         ext = ext.lower()
         
-        if ext == ".docx":
-            tables = extract_tables_from_docx_with_camelot(temp_path)
-        else:
-            tables = extract_tables_from_pdf_with_camelot(temp_path, pages=pages if pages is not None else "all")
+#         if ext == ".docx":
+#             tables = extract_tables_from_docx_with_camelot(temp_path)
+#         else:
+#             tables = extract_tables_from_pdf_with_camelot(temp_path, pages=pages if pages is not None else "all")
             
-        tables_json = [table.to_dict(orient="records") for table in tables]
+#         tables_json = [table.to_dict(orient="records") for table in tables]
         
-        task_store.update_task(
-            task_id, 
-            status="completed",
-            details={"table_count": len(tables_json)}
-        )
-        return {"tables": tables_json, "task_id": task_id}
-    except Exception as e:
-        task_store.update_task(task_id, status="error", details={"error": str(e)})
-        raise
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+#         task_store.update_task(
+#             task_id, 
+#             status="completed",
+#             details={"table_count": len(tables_json)}
+#         )
+#         return {"tables": tables_json, "task_id": task_id}
+#     except Exception as e:
+#         task_store.update_task(task_id, status="error", details={"error": str(e)})
+#         raise
+#     finally:
+#         if os.path.exists(temp_path):
+#             os.remove(temp_path)
 
-@router.post("/export_csv")
-async def export_csv(
-    file: UploadFile = File(...), 
-    method: str = Query("camelot"),
-    base_filename: Optional[str] = Query("table"),
-    pages: Optional[str] = Query("all")
-):
-    task_id = task_store.create_task(
-        task_type="export_csv",
-        filename=file.filename,
-        details={
-            "method": method,
-            "base_filename": base_filename,
-            "pages": pages
-        }
-    )
+# @router.post("/export_csv")
+# async def export_csv(
+#     file: UploadFile = File(...), 
+#     method: str = Query("camelot"),
+#     base_filename: Optional[str] = Query("table"),
+#     pages: Optional[str] = Query("all")
+# ):
+#     task_id = task_store.create_task(
+#         task_type="export_csv",
+#         filename=file.filename,
+#         details={
+#             "method": method,
+#             "base_filename": base_filename,
+#             "pages": pages
+#         }
+#     )
     
-    temp_path = f"temp_{file.filename}"
-    try:
-        task_store.update_task(task_id, status="processing")
-        with open(temp_path, "wb") as f:
-            f.write(await file.read())
+#     temp_path = f"temp_{file.filename}"
+#     try:
+#         task_store.update_task(task_id, status="processing")
+#         with open(temp_path, "wb") as f:
+#             f.write(await file.read())
             
-        _, ext = os.path.splitext(temp_path)
-        ext = ext.lower()
+#         _, ext = os.path.splitext(temp_path)
+#         ext = ext.lower()
         
-        if ext == ".docx":
-            tables = extract_tables_from_docx_with_camelot(temp_path)
-        else:
-            if method == "tabula":
-                tables = extract_tables_from_pdf(temp_path, pages=pages if pages is not None else "all")
-            else:
-                tables = extract_tables_from_pdf_with_camelot(temp_path, pages=pages if pages is not None else "all")
+#         if ext == ".docx":
+#             tables = extract_tables_from_docx_with_camelot(temp_path)
+#         else:
+#             if method == "tabula":
+#                 tables = extract_tables_from_pdf(temp_path, pages=pages if pages is not None else "all")
+#             else:
+#                 tables = extract_tables_from_pdf_with_camelot(temp_path, pages=pages if pages is not None else "all")
                 
-        safe_base_filename = base_filename if base_filename is not None else "table"
-        export_tables_to_csv(tables, base_filename=safe_base_filename)
+#         safe_base_filename = base_filename if base_filename is not None else "table"
+#         export_tables_to_csv(tables, base_filename=safe_base_filename)
         
-        task_store.update_task(
-            task_id, 
-            status="completed",
-            details={
-                "table_count": len(tables),
-                "output_base": safe_base_filename
-            }
-        )
-        return {
-            "message": f"Exported {len(tables)} tables to CSV with base filename '{safe_base_filename}'.",
-            "task_id": task_id
-        }
-    except Exception as e:
-        task_store.update_task(task_id, status="error", details={"error": str(e)})
-        raise
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+#         task_store.update_task(
+#             task_id, 
+#             status="completed",
+#             details={
+#                 "table_count": len(tables),
+#                 "output_base": safe_base_filename
+#             }
+#         )
+#         return {
+#             "message": f"Exported {len(tables)} tables to CSV with base filename '{safe_base_filename}'.",
+#             "task_id": task_id
+#         }
+#     except Exception as e:
+#         task_store.update_task(task_id, status="error", details={"error": str(e)})
+#         raise
+#     finally:
+#         if os.path.exists(temp_path):
+#             os.remove(temp_path)
 
 @router.post("/extract-resume-text")
 async def extract_resume_txt(request: Request, file: UploadFile = File(...), _: None = Depends(get_doctr_dependency)):

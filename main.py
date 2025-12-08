@@ -6,6 +6,8 @@ import uvicorn as uv
 import os
 from functools import lru_cache
 import threading
+import psutil
+import signal
 try:
     import certifi
     os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
@@ -58,14 +60,28 @@ def get_ner_pipeline_general():
         model_general = "dbmdz/bert-large-cased-finetuned-conll03-english"
         return pipeline(task="token-classification", model=model_general, aggregation_strategy="simple")
 
+def cleanup_resources():
+    """Cleanup before shutdown"""
+    import gc
+    gc.collect()
+    print("Resources cleaned up")
+    
+def signal_handler(sig, frame):
+    cleanup_resources()
+    exit(0)
+
+signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("FastAPI startup - Models will load on first use (lazy loading)")
-    print("OCR will use TrOCR (microsoft/trocr-large-printed and handwritten)")
+    print(f"Initial memory: {psutil.Process().memory_info().rss / 1024 / 1024:.1f}MB")
     
     yield
     
     print("Shutting down...")
+    cleanup_resources()
 
 app = FastAPI(title="APLSys Backend", lifespan=lifespan)
 app.add_middleware(CORSMiddleware,

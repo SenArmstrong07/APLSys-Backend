@@ -1,5 +1,5 @@
 # Use slim Python base
-FROM python:3.12-slim
+FROM python:3.11-slim
 
 # Prevents Python from writing .pyc files and buffers logs (better for Docker)
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -7,37 +7,26 @@ ENV PYTHONUNBUFFERED=1
 
 # Install system dependencies required for OpenCV, DocTR, and PDF/image handling
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1 \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender1 \
-    libjpeg-dev \
-    zlib1g \
-    ghostscript \
-    libxml2 \
-    libxslt1.1 \
-    openjdk-21-jre-headless \
-    build-essential \
-    ca-certificates \
-    poppler-utils \
- && rm -rf /var/lib/apt/lists/*
+    libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 \
+    libjpeg-dev zlib1g libxml2 poppler-utils \
+ && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # Set working directory
 WORKDIR /app
 
 # Copy dependency files first (better Docker caching)
-COPY requirements.txt /app/
+COPY requirements.txt .
 
 # Install Python dependencies
 RUN pip install --upgrade pip setuptools wheel
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the rest of the application code
-COPY . /app
+COPY . .
 
 # Expose port (Railway uses PORT environment variable automatically)
+ENV PYTHONHASHSEED=random
 ENV PORT=8000
 
 # Start FastAPI app with Uvicorn
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--timeout-keep-alive", "5"]

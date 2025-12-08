@@ -20,6 +20,8 @@ import asyncio
 import numpy as np
 import importlib
 import gc
+import psutil
+import sys
 
 load_dotenv()
 
@@ -37,6 +39,15 @@ OCRLine = Dict[str, List[OCRWord]]
 OCRBlock = Dict[str, List[OCRLine]]
 OCRPage = Dict[str, List[OCRBlock]]
 OCRResult = Dict[str, List[OCRPage]]
+
+# Add memory tracking constants
+MAX_MEMORY_MB = 1024  # Hard limit per request
+WARN_MEMORY_MB = 900  # Warning threshold
+DOCTR_DPI = 200  # Reduced from 300 for memory savings
+
+# Adjust thresholds for Doctr loading
+DOCTR_REQUIRED_MB = 150  # Memory needed to safely load DocTR (adjust based on your model)
+DOCTR_BUFFER_MB = 50    # Safety buffer after loading
 
 def update_processing_status(filename: Optional[str], status: str, error: Optional[str] = None):
     """Update processing status for a file"""
@@ -66,6 +77,17 @@ def get_processing_status() -> Dict[str, Any]:
         "files": list(processing_status.values())
     }
 
+def get_memory_usage() -> float:
+    """Get current process memory usage in MB"""
+    process = psutil.Process(os.getpid())
+    return process.memory_info().rss / 1024 / 1024
+
+def check_memory_available(required_mb: int = 100) -> bool:
+    """Check if enough memory is available"""
+    current = get_memory_usage()
+    available = MAX_MEMORY_MB - current
+    return available >= required_mb
+
 def _preprocess_image_for_trocr(img_array: np.ndarray) -> Image.Image:
     """Preprocess image for TrOCR: denoise, contrast enhancement, convert to PIL"""
     # 1. Convert to grayscale if needed
@@ -85,20 +107,24 @@ def _preprocess_image_for_trocr(img_array: np.ndarray) -> Image.Image:
     pil_img = Image.fromarray(contrast).convert('RGB')
     return pil_img
 
-def _preprocess_image_for_doctr(img_array: np.ndarray) -> Image.Image:
+# Optimize image preprocessing for lower DPI
+def _preprocess_image_for_doctr(img_array: np.ndarray, target_dpi: int = 200) -> Image.Image:
     """
-    Minimal preprocessing for DocTR: just convert to RGB PIL.
-    DocTR has its own internal normalization; heavy preprocessing degrades performance.
+    Minimal preprocessing for DocTR with lower DPI for memory efficiency.
     """
-    # If grayscale, convert to RGB (DocTR expects 3 channels)
+    # Resize if image is too large
+    h, w = img_array.shape[:2]
+    max_dim = 1500  # Reduce from default
+    if max(h, w) > max_dim:
+        scale = max_dim / max(h, w)
+        new_h, new_w = int(h * scale), int(w * scale)
+        img_array = cv2.resize(img_array, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    
     if len(img_array.shape) == 2:
-        # grayscale -> RGB
         img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
     elif len(img_array.shape) == 3 and img_array.shape[2] == 4:
-        # RGBA -> RGB
         img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2RGB)
     
-    # Convert to PIL (no contrast/denoise — let DocTR handle it)
     pil_img = Image.fromarray(img_array).convert('RGB')
     return pil_img
 
@@ -141,17 +167,17 @@ async def run_ocr(trocr_printed, file) -> Dict[str, Any]:
         update_processing_status(filename, "error", str(e))
         raise
 
-def pdf_to_images_bytes(pdf_bytes: bytes, dpi: int = 300) -> List[bytes]:
-    """
-    Convert PDF bytes to a list of PNG image bytes (one per page).
-    Returns list[bytes].
-    """
-    pages = convert_from_bytes(pdf_bytes, dpi=dpi)
+# Optimize PDF conversion
+def pdf_to_images_bytes(pdf_bytes: bytes, dpi: int = 200) -> List[bytes]:  # Reduced from 300
+    """Convert PDF to images with lower DPI for memory efficiency"""
+    pages = convert_from_bytes(pdf_bytes, dpi=dpi, fmt='ppm')  # Use PPM instead of PNG
     out = []
     for page in pages:
+        # Reduce quality
         buf = BytesIO()
-        page.save(buf, format="PNG")
+        page.save(buf, format="JPEG", quality=75, optimize=True)
         out.append(buf.getvalue())
+        del page  # Explicit cleanup
     return out
 
 def save_pdf_images(
@@ -376,49 +402,71 @@ def load_ocr_layer(json_path):
     with open(json_path, "r", encoding="utf-8") as f:
         return json.load(f)
 
-def create_doctr_ocr():
+# Modify create_doctr_ocr to be memory-aware
+def create_doctr_ocr(device: str = "cpu"):
     """
-    Dynamically import and instantiate a Doctr OCR predictor.
-    This avoids importing doctr at startup; import and model instantiation
-    happen only when this function is called (i.e. inside an AI request).
+    Create Doctr OCR with memory optimization.
+    Use CPU by default (GPU not available on free tier anyway).
     """
-    print("Loading Doctr OCR predictor (on-demand)...")
-    doctr_loaded = False
-    # import doctr lazily
-    doctr_models = importlib.import_module("doctr.models")
     
-    # Load specific detector + recognizer
-    detector = doctr_models.db_mobilenet_v3_large(pretrained=True)
-    recognizer = doctr_models.crnn_vgg16_bn(pretrained=True)  
+    current_mem = get_memory_usage()
+    available_mem = MAX_MEMORY_MB - current_mem
     
-    # common API: ocr_predictor(pretrained=True)
-    predictor = doctr_models.ocr_predictor(
-        det_arch=detector,
-        reco_arch=recognizer,
-        pretrained=True,
-        assume_straight_pages=True,
-    )
-    if (predictor is not None):
-        doctr_loaded = True
-    print("Doctr OCR predictor loaded:" + str(doctr_loaded))
-    return predictor
+    # Check if we have enough memory to load DocTR
+    if available_mem < DOCTR_REQUIRED_MB:
+        raise MemoryError(
+            f"Insufficient memory to load DocTR. "
+            f"Current: {current_mem:.1f}MB, Required: {DOCTR_REQUIRED_MB}MB, "
+            f"Available: {available_mem:.1f}MB / {MAX_MEMORY_MB}MB"
+        )
+    
+    if not check_memory_available(150):
+        raise MemoryError(f"Insufficient memory: {get_memory_usage():.1f}MB / {MAX_MEMORY_MB}MB")
+    
+    print(f"Loading Doctr OCR (device={device}, current memory={get_memory_usage():.1f}MB)...")
+    
+    try:
+        doctr_models = importlib.import_module("doctr.models")
+        
+        # Use smaller, faster models
+        detector = doctr_models.fast_small(pretrained=True)  # Smaller than large
+        recognizer = doctr_models.crnn_mobilenet_v3_small(pretrained=True)  # Smaller model
+        
+        predictor = doctr_models.ocr_predictor(
+            det_arch=detector,
+            reco_arch=recognizer,
+            pretrained=True,
+            assume_straight_pages=True,
+        )
+        
+        if device == "cpu":
+            predictor = predictor.to("cpu")
+            
+        mem_after = get_memory_usage()
+        print(f"Doctr loaded. Memory: {mem_after:.1f}MB (delta: +{mem_after - current_mem:.1f}MB)")
+        return predictor
+    except Exception as e:
+        print(f"Failed to load Doctr: {e}")
+        raise
 
 def dispose_doctr_ocr(predictor):
-    """
-    Dispose of the predictor to free memory. Attempts to release GPU memory
-    if torch is available.
-    """
+    """Aggressively dispose of predictor and free memory"""
     try:
-        # remove references and run GC
+        if hasattr(predictor, "model"):
+            del predictor.model
+        if hasattr(predictor, "det_predictor"):
+            del predictor.det_predictor
+        if hasattr(predictor, "reco_predictor"):
+            del predictor.reco_predictor
         del predictor
     except Exception:
         pass
+    
     gc.collect()
-    print("Disposed Doctr OCR predictor and ran garbage collection.")
+    import ctypes
     try:
-        import torch
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-    except Exception:
-        # Torch not installed or other issue; ignore
+        ctypes.CDLL("libc.so.6").malloc_trim(0)  # Linux-specific memory trim
+    except (OSError, AttributeError):
         pass
+    
+    print(f"Memory after cleanup: {get_memory_usage():.1f}MB")

@@ -13,9 +13,12 @@ from services.ocr_service import (
     get_processing_status,
     update_processing_status,
     create_doctr_ocr,
-    dispose_doctr_ocr
+    dispose_doctr_ocr,
+    get_memory_usage
 )
 from utils.task_store import TaskStore
+from utils.ocr_rate_limiter import ocr_limiter
+from utils.ocr_queue import ocr_queue
 from typing import Optional
 from PIL import Image
 import numpy as np
@@ -302,21 +305,50 @@ async def process_folder(request: Request, files: List[UploadFile] = File(...), 
         task_store.update_task(batch_task_id, status="error", details={"error": str(e)})
         raise
 
+# Add this helper
+def get_client_ip(request: Request) -> str:
+    """Extract client IP from request"""
+    if request.client:
+        return request.client.host
+    return request.headers.get("x-forwarded-for", "unknown").split(",")[0].strip()
+
+
 @router.post("/batch-ocr")
 async def batch_ocr(request: Request, files: List[UploadFile] = File(...), _: None = Depends(get_doctr_dependency)):
-    """Run OCR on multiple uploaded files using Doctr."""
+    """Run OCR on multiple uploaded files with rate limiting and memory checks."""
+    client_ip = get_client_ip(request)
+    
+    # 1) Check rate limit
+    allowed, reason, retry_after = ocr_limiter.check_rate_limit(client_ip)
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=reason,
+            headers={"Retry-After": str(retry_after)}
+        )
+    
+    # 2) Check batch size
+    batch_ok, batch_reason = ocr_limiter.check_batch_size(len(files))
+    if not batch_ok:
+        raise HTTPException(status_code=400, detail=batch_reason)
+    
+    # 3) Check individual file sizes
+    for file in files:
+        if file.size:
+            file_ok, file_reason = ocr_limiter.check_file_size(file.size)
+            if not file_ok:
+                raise HTTPException(status_code=413, detail=file_reason)
+    
     batch_task_id = task_store.create_task("batch_ocr", filename=None, details={"file_count": len(files)})
     task_store.update_task(batch_task_id, status="running", details={"started_by": "api"})
     
     results = []
     
-    # Get Doctr predictor from request.state (created by dependency)
-    predictor = getattr(request.state, "doctr_predictor", None)
-    if predictor is None:
-        task_store.update_task(batch_task_id, status="error", details={"error": "Doctr OCR predictor not available"})
-        raise HTTPException(status_code=500, detail="Doctr OCR predictor not available")
-    
     try:
+        predictor = getattr(request.state, "doctr_predictor", None)
+        if predictor is None:
+            raise HTTPException(status_code=500, detail="Doctr OCR predictor not available")
+        
         for idx, file in enumerate(files, 1):
             file_task_id = task_store.create_task(
                 "ocr_file",
@@ -381,6 +413,7 @@ async def batch_ocr(request: Request, files: List[UploadFile] = File(...), _: No
                         os.remove(temp_path)
                     except Exception:
                         pass
+                ocr_limiter.release_request(client_ip)
             
             task_store.update_task(batch_task_id, progress=float(idx) / len(files))
     
@@ -391,102 +424,82 @@ async def batch_ocr(request: Request, files: List[UploadFile] = File(...), _: No
     task_store.update_task(batch_task_id, status="completed", progress=1.0)
     return {"results": results}
 
-@router.post("/extract-full")
-async def extract_text_full(file: UploadFile, ocrreq: Request, _: None = Depends(get_doctr_dependency)):
-    task_id = task_store.create_task(
-        task_type="extract_full",
-        filename=file.filename
-    )
-    
+# Add worker helpers that create/dispose Doctr predictor inside the worker
+async def _worker_process_full(content: bytes, filename: str, client_ip: str):
+    predictor = None
     temp_path = None
+    mem_before = get_memory_usage()
     try:
-        task_store.update_task(task_id, status="processing")
-        # use Doctr predictor from request.state
-        predictor = getattr(ocrreq.state, "doctr_predictor", None)
-        content = await file.read()
-        
+        # record memory at job start (TaskStore update optional)
+        # create predictor in worker (memory scoped to the job)
+        predictor = create_doctr_ocr()
+        # run extraction (same logic as original endpoint)
         doc, exported = extract_on_document(content, predictor)
-        
-        # If doc is a PIL Image, run Doctr predictor on it
         if isinstance(doc, Image.Image):
-            if predictor is None:
-                raise HTTPException(status_code=500, detail="OCR predictor not available")
-            import importlib
+            import importlib, tempfile as _tempfile
             doctr_io = importlib.import_module("doctr.io")
-            
-            # Save PIL Image to temporary file (DocTR expects file paths, not arrays)
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            with _tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
                 temp_path = tmp.name
                 doc.save(temp_path)
-            
-            # Pass file path to DocumentFile.from_images
             doc_file = doctr_io.DocumentFile.from_images([temp_path])
             result = await asyncio.to_thread(predictor, doc_file)
             exported = result.export()
-        
-        task_store.update_task(
-            task_id, 
-            status="completed",
-            details={"page_count": len(exported.get("pages", []))}
-        )
-        return {"result": exported, "task_id": task_id}
-    except Exception as e:
-        task_store.update_task(task_id, status="error", details={"error": str(e)})
-        raise
+        return exported
     finally:
-        # Clean up temporary file
+        mem_after = get_memory_usage()
+        try:
+            # update task store with memory snapshot if this job has a task entry
+            task_store.update_task(
+                task_id=task_store.create_task("mem_snapshot", filename=filename),
+                status="completed",
+                details={"mem_before_mb": mem_before, "mem_after_mb": mem_after}
+            )
+        except Exception:
+            pass
+        # cleanup temp file and predictor, release limiter slot
         if temp_path and os.path.exists(temp_path):
             try:
                 os.remove(temp_path)
             except Exception:
                 pass
+        try:
+            if predictor is not None:
+                dispose_doctr_ocr(predictor)
+        except Exception:
+            pass
+        # ensure the rate limiter slot is released
+        try:
+            ocr_limiter.release_request(client_ip)
+        except Exception:
+            pass
 
-@router.post("/extract-region")
-async def extract_text_region(ocrreq: Request, file: UploadFile = File(...), _: None = Depends(get_doctr_dependency)):
-    task_id = task_store.create_task(
-        task_type="extract_region",
-        filename=file.filename
-    )
-    
+async def _worker_process_region(content: bytes, filename: str, client_ip: str):
+    predictor = None
     temp_path = None
     try:
-        task_store.update_task(task_id, status="processing")
-        # use Doctr predictor from request.state
-        predictor = getattr(ocrreq.state, "doctr_predictor", None)
-        content = await file.read()
-        
-        # Normalize bytes/path into exported OCR structure (dict with "pages")
+        predictor = create_doctr_ocr()
         doc, result = extract_on_document(content, predictor)
-
-        # If extract_on_document returned a PIL image, run Doctr predictor
         if isinstance(doc, Image.Image):
-            if predictor is None:
-                raise HTTPException(status_code=500, detail="OCR predictor not available")
-            import importlib
+            import importlib, tempfile as _tempfile
             doctr_io = importlib.import_module("doctr.io")
-            
-            # Save PIL Image to temporary file (DocTR expects file paths, not arrays)
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            with _tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
                 temp_path = tmp.name
                 doc.save(temp_path)
-            
-            # Pass file path to DocumentFile.from_images
             doc_file = doctr_io.DocumentFile.from_images([temp_path])
             ocr_result = await asyncio.to_thread(predictor, doc_file)
             result = ocr_result.export()
 
-        text = []
+        text_lines = []
         confidences = []
         for page in result.get("pages", []):
             for block in page.get("blocks", []):
                 if not isinstance(block, dict):
                     continue
                 for line in block.get("lines", []):
-                    # sort words left-to-right using geometry if available to preserve correct reading order
                     words = line.get("words", []) or []
+                    # preserve left-to-right order if geometry exists
                     def _word_x(w):
                         geom = w.get("geometry") or []
-                        # geometry expected as list of [ [x,y], ... ] normalized coordinates
                         if isinstance(geom, list) and len(geom) and isinstance(geom[0], list):
                             xs = [pt[0] for pt in geom if isinstance(pt, list) and len(pt) >= 2]
                             return min(xs) if xs else 0.0
@@ -494,67 +507,108 @@ async def extract_text_region(ocrreq: Request, file: UploadFile = File(...), _: 
                     words_sorted = sorted(words, key=_word_x)
                     line_text = " ".join([w.get("value", "") for w in words_sorted]).strip()
                     if line_text:
-                        text.append(line_text)
-                    for word in words_sorted:
-                        if "confidence" in word and word["confidence"] is not None:
-                            confidences.append(word["confidence"])
-        
+                        text_lines.append(line_text)
+                    for w in words_sorted:
+                        if "confidence" in w and w["confidence"] is not None:
+                            confidences.append(w["confidence"])
         avg_conf = float(sum(confidences) / len(confidences)) if confidences else 0.0
-        task_store.update_task(
-            task_id, 
-            status="completed",
-            details={
-                "text_length": len("\n".join(text)),
-                "confidence": avg_conf
-            }
-        )
-        return {
-            "text": "\n".join(text), 
-            "confidence": avg_conf,
-            "task_id": task_id
-        }
-    except Exception as e:
-        task_store.update_task(task_id, status="error", details={"error": str(e)})
-        raise
+        return {"text": "\n".join(text_lines), "confidence": avg_conf, "ocr_layer": result}
     finally:
-        # Clean up temporary file
         if temp_path and os.path.exists(temp_path):
             try:
                 os.remove(temp_path)
             except Exception:
                 pass
+        try:
+            if predictor is not None:
+                dispose_doctr_ocr(predictor)
+        except Exception:
+            pass
+        try:
+            ocr_limiter.release_request(client_ip)
+        except Exception:
+            pass
 
-@router.post("/extract-metadata")
-async def extract_metadata_from_image(ocrreq: Request, file: UploadFile = File(...)):
+@router.post("/extract-full")
+async def extract_text_full(ocrreq: Request, file: UploadFile = File(...)):
     task_id = task_store.create_task(
-        task_type="extract_metadata",
+        task_type="extract_full",
         filename=file.filename
     )
-    
+
+    # Rate limit & file-size checks (uses existing limiter)
+    client_ip = get_client_ip(ocrreq)
+    allowed, reason, retry_after = ocr_limiter.check_rate_limit(client_ip)
+    if not allowed:
+        task_store.update_task(task_id, status="error", details={"error": reason})
+        raise HTTPException(status_code=429, detail=reason, headers={"Retry-After": str(retry_after)})
+
+    # file size guard (if available)
+    size = getattr(file, "size", None)
+    if size is not None:
+        ok, msg = ocr_limiter.check_file_size(size)
+        if not ok:
+            task_store.update_task(task_id, status="error", details={"error": msg})
+            ocr_limiter.release_request(client_ip)
+            raise HTTPException(status_code=413, detail=msg)
+
+    temp_path = None
     try:
         task_store.update_task(task_id, status="processing")
         content = await file.read()
-        exported = ocr_space_ocr(content)
-        
-        full_text = []
-        for page in exported["pages"]:
-            for block in page.get("blocks", []):
-                for line in block.get("lines", []):
-                    line_text = " ".join([word["value"] for word in line.get("words", [])])
-                    full_text.append(line_text)
-        plain_text = "\n".join(full_text)
-        
+
+        # Submit job to the OCR queue; worker creates/disposes predictor
+        exported = await ocr_queue.submit(_worker_process_full, content, file.filename or "uploaded", client_ip)
+
         task_store.update_task(
-            task_id, 
+            task_id,
             status="completed",
-            details={
-                "text_length": len(plain_text),
-                "page_count": len(exported["pages"])
-            }
+            details={"page_count": len(exported.get("pages", [])) if isinstance(exported, dict) else 0}
+        )
+        return {"result": exported, "task_id": task_id}
+    except Exception as e:
+        task_store.update_task(task_id, status="error", details={"error": str(e)})
+        raise
+
+@router.post("/extract-region")
+async def extract_text_region(ocrreq: Request, file: UploadFile = File(...)):
+    task_id = task_store.create_task(
+        task_type="extract_region",
+        filename=file.filename
+    )
+
+    client_ip = get_client_ip(ocrreq)
+    allowed, reason, retry_after = ocr_limiter.check_rate_limit(client_ip)
+    if not allowed:
+        task_store.update_task(task_id, status="error", details={"error": reason})
+        raise HTTPException(status_code=429, detail=reason, headers={"Retry-After": str(retry_after)})
+
+    # file size guard
+    size = getattr(file, "size", None)
+    
+    if size is not None:
+        ok, msg = ocr_limiter.check_file_size(size)
+        if not ok:
+            task_store.update_task(task_id, status="error", details={"error": msg})
+            ocr_limiter.release_request(client_ip)
+            raise HTTPException(status_code=413, detail=msg)
+
+    try:
+        task_store.update_task(task_id, status="processing")
+        content = await file.read()
+
+        # Submit to queue; worker returns text + confidence
+        result = await ocr_queue.submit(_worker_process_region, content, file.filename or "uploaded", client_ip)
+
+        # Update task and return the extracted text with confidence
+        task_store.update_task(
+            task_id,
+            status="completed",
+            details={"text_length": len(result.get("text", "")), "confidence": result.get("confidence", 0.0)}
         )
         return {
-            "text": plain_text,
-            "ocr_layer": exported,
+            "text": result.get("text", ""),
+            "confidence": result.get("confidence", 0.0),
             "task_id": task_id
         }
     except Exception as e:

@@ -1,5 +1,5 @@
 import layoutparser as lp
-from camelot.io import read_pdf as camelot_read_pdf
+#from camelot.io import read_pdf as camelot_read_pdf
 from tabula.io import read_pdf
 from docx import Document
 import pandas as pd
@@ -196,36 +196,36 @@ def extract_tables_from_pdf(pdf_path, pages="all"):
     tables = read_pdf(pdf_path, pages=pages, multiple_tables=True)
     return tables
 
-def extract_tables_from_pdf_with_camelot(pdf_path, pages="all"):
-    """
-    Extract tables from a PDF using Camelot.
-    Returns a list of pandas DataFrames, one for each table found.
-    """
-    tables = camelot_read_pdf(pdf_path, pages=pages)
-    dataframes = [table.df for table in tables]
-    return dataframes
+# def extract_tables_from_pdf_with_camelot(pdf_path, pages="all"):
+#     """
+#     Extract tables from a PDF using Camelot.
+#     Returns a list of pandas DataFrames, one for each table found.
+#     """
+#     tables = camelot_read_pdf(pdf_path, pages=pages)
+#     dataframes = [table.df for table in tables]
+#     return dataframes
 
-def extract_tables_from_docx_with_camelot(docx_path):
-    """
-    Extract tables from a .docx file using python-docx.
-    Returns a list of pandas DataFrames, one for each table found.
-    """
-    doc = Document(docx_path)
-    dataframes = []
-    for table in doc.tables:
-        rows = []
-        for row in table.rows:
-            # get text for each cell, strip whitespace
-            cells = [cell.text.strip() for cell in row.cells]
-            rows.append(cells)
-        if not rows:
-            continue
-        # normalize row lengths (pad shorter rows with empty strings)
-        max_cols = max(len(r) for r in rows)
-        normalized = [r + [""] * (max_cols - len(r)) for r in rows]
-        df = pd.DataFrame(normalized)
-        dataframes.append(df)
-    return dataframes
+# def extract_tables_from_docx_with_camelot(docx_path):
+#     """
+#     Extract tables from a .docx file using python-docx.
+#     Returns a list of pandas DataFrames, one for each table found.
+#     """
+#     doc = Document(docx_path)
+#     dataframes = []
+#     for table in doc.tables:
+#         rows = []
+#         for row in table.rows:
+#             # get text for each cell, strip whitespace
+#             cells = [cell.text.strip() for cell in row.cells]
+#             rows.append(cells)
+#         if not rows:
+#             continue
+#         # normalize row lengths (pad shorter rows with empty strings)
+#         max_cols = max(len(r) for r in rows)
+#         normalized = [r + [""] * (max_cols - len(r)) for r in rows]
+#         df = pd.DataFrame(normalized)
+#         dataframes.append(df)
+#     return dataframes
 
 def export_tables_to_csv(tables, base_filename="table"):
     """
