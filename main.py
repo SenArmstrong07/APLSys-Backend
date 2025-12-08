@@ -1,7 +1,6 @@
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from api import routes_ocr, routes_ai, routes_debug, routes_parser
-from transformers import pipeline
 import uvicorn as uv
 import os
 from functools import lru_cache
@@ -24,6 +23,7 @@ MODEL_LOCK = threading.Lock()
 @lru_cache(maxsize=1)
 def get_trocr_printed():
     """Load TrOCR model for printed text"""
+    from transformers import pipeline
     with MODEL_LOCK:
         print("Loading TrOCR model (printed)...")
         return pipeline(task="image-to-text", model="microsoft/trocr-large-printed")
@@ -31,6 +31,7 @@ def get_trocr_printed():
 @lru_cache(maxsize=1)
 def get_trocr_handwritten():
     """Load TrOCR model for handwritten text"""
+    from transformers import pipeline
     with MODEL_LOCK:
         print("Loading TrOCR model (handwritten)...")
         return pipeline(task="image-to-text", model="microsoft/trocr-large-handwritten")
@@ -39,6 +40,7 @@ def get_trocr_handwritten():
 @lru_cache(maxsize=1)
 def get_ner_pipeline_basic():
     """Load basic NER model only when first requested"""
+    from transformers import pipeline
     with MODEL_LOCK:
         print("Loading basic NER model (lazy)...")
         model_basic = "DeezNutz1337/Bert-Based-Resume-Profiler_BASIC"
@@ -47,6 +49,7 @@ def get_ner_pipeline_basic():
 @lru_cache(maxsize=1)
 def get_ner_pipeline_semantic():
     """Load semantic NER model only when first requested"""
+    from transformers import pipeline
     with MODEL_LOCK:
         print("Loading semantic NER model (lazy)...")
         model_semantic = "DeezNutz1337/Bert-Based-Resume-Profiler_SEMANTIC"
@@ -55,6 +58,7 @@ def get_ner_pipeline_semantic():
 @lru_cache(maxsize=1)
 def get_ner_pipeline_general():
     """Load general NER model only when first requested"""
+    from transformers import pipeline
     with MODEL_LOCK:
         print("Loading general NER model (lazy)...")
         model_general = "dbmdz/bert-large-cased-finetuned-conll03-english"

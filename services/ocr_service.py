@@ -402,23 +402,61 @@ def load_ocr_layer(json_path):
     with open(json_path, "r", encoding="utf-8") as f:
         return json.load(f)
 
+def _free_transformer_model_caches():
+    """
+    Best-effort: clear large transformer pipelines to free memory.
+    Avoid top-level imports to prevent circular import issues.
+    """
+    try:
+        import importlib, gc
+        main_mod = importlib.import_module("main")
+        for fn in ("get_trocr_printed", "get_trocr_handwritten",
+                   "get_ner_pipeline_basic", "get_ner_pipeline_semantic", "get_ner_pipeline_general"):
+            f = getattr(main_mod, fn, None)
+            if f and hasattr(f, "cache_clear"):
+                try:
+                    f.cache_clear()
+                except Exception:
+                    pass
+        # remove state entries if set
+        app = getattr(main_mod, "app", None)
+        if app is not None:
+            for key in ("get_trocr_printed", "get_trocr_handwritten",
+                        "get_ner_resume_pipeline_basic", "get_ner_resume_pipeline_semantic", "get_general_ner_pipeline"):
+                if hasattr(app.state, key):
+                    try:
+                        delattr(app.state, key)
+                    except Exception:
+                        pass
+        gc.collect()
+    except Exception:
+        # non-fatal; just continue
+        pass
+
 # Modify create_doctr_ocr to be memory-aware
 def create_doctr_ocr(device: str = "cpu"):
     """
     Create Doctr OCR with memory optimization.
     Use CPU by default (GPU not available on free tier anyway).
     """
+    # best-effort free heavy models before measuring
+    _free_transformer_model_caches()
     
     current_mem = get_memory_usage()
     available_mem = MAX_MEMORY_MB - current_mem
     
     # Check if we have enough memory to load DocTR
     if available_mem < DOCTR_REQUIRED_MB:
-        raise MemoryError(
-            f"Insufficient memory to load DocTR. "
-            f"Current: {current_mem:.1f}MB, Required: {DOCTR_REQUIRED_MB}MB, "
-            f"Available: {available_mem:.1f}MB / {MAX_MEMORY_MB}MB"
-        )
+        # Try one more time after freeing caches
+        _free_transformer_model_caches()
+        current_mem = get_memory_usage()
+        available_mem = MAX_MEMORY_MB - current_mem
+        if available_mem < DOCTR_REQUIRED_MB:
+            raise MemoryError(
+                f"Insufficient memory to load DocTR. "
+                f"Current: {current_mem:.1f}MB, Required: {DOCTR_REQUIRED_MB}MB, "
+                f"Available: {available_mem:.1f}MB / {MAX_MEMORY_MB}MB"
+            )
     
     if not check_memory_available(150):
         raise MemoryError(f"Insufficient memory: {get_memory_usage():.1f}MB / {MAX_MEMORY_MB}MB")
