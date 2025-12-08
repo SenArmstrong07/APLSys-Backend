@@ -17,7 +17,7 @@ class OCRRateLimiter:
         max_requests_per_minute: int = 3,
         max_batch_files: int = 5,
         max_file_size_mb: int = 20,
-        memory_threshold_mb: int = 850
+        memory_threshold_mb: int = 900
     ):
         self.max_requests_per_minute = max_requests_per_minute
         self.max_batch_files = max_batch_files
@@ -112,5 +112,5 @@ ocr_limiter = OCRRateLimiter(
     max_requests_per_minute=3,
     max_batch_files=5,
     max_file_size_mb=20,
-    memory_threshold_mb=850
+    memory_threshold_mb=900
 )
