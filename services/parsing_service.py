@@ -9,6 +9,12 @@ import os
 import fitz
 from doctr.io import DocumentFile
 from typing import Optional
+import asyncio
+import tempfile
+import json
+import os
+import sys
+import psutil
 
 # try to import python-docx; keep optional to avoid hard failure at import time
 try:
@@ -306,3 +312,74 @@ def format_structured_resume(structured: Dict[str, str]) -> str:
         if content:
             formatted.append(f"\n## {section.upper()}\n{content}")
     return "\n".join(formatted)
+
+def _ner_subprocess_worker(input_file: str, output_file: str, model_id: str):
+    """
+    Child process: load transformers pipeline, run NER on text, write result + child peak RSS.
+    """
+    try:
+        import importlib, json, psutil
+        from transformers import pipeline
+
+        # Read input
+        with open(input_file, "r", encoding="utf-8") as f:
+            text = f.read()
+
+        mem_before = psutil.Process().memory_info().rss / 1024 / 1024
+        p = pipeline(task="token-classification", model=model_id, aggregation_strategy="simple", device=-1)
+        res = p(text)
+        mem_after = psutil.Process().memory_info().rss / 1024 / 1024
+        mem_peak = max(mem_before, mem_after)
+
+        with open(output_file, "w", encoding="utf-8") as out:
+            json.dump({"result": res, "mem_peak_mb": round(mem_peak, 1)}, out)
+        return 0
+    except Exception as e:
+        with open(output_file, "w", encoding="utf-8") as out:
+            json.dump({"error": str(e)}, out)
+        return 1
+
+async def run_ner_in_subprocess(text: str, model_id: str = "DeezNutz1337/Resume-Parser-BERT_Based") -> dict:
+    """
+    Run NER in isolated subprocess to ensure memory is reclaimed when the child exits.
+    Returns dict: {"result": [...], "mem_peak_mb": X} or raises RuntimeError.
+    """
+    loop = asyncio.get_event_loop()
+    # prepare temp files
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, encoding="utf-8", suffix=".txt") as inp:
+        inp.write(text)
+        input_file = inp.name
+    output_file = tempfile.mktemp(suffix=".json")
+    try:
+        cwd = os.getcwd()
+        code = f"""
+import sys
+sys.path.insert(0, {repr(cwd)})
+from services.ner_service import _ner_subprocess_worker
+exit(_ner_subprocess_worker({repr(input_file)}, {repr(output_file)}, {repr(model_id)}))
+"""
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", code,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            err = stderr.decode("utf-8", errors="ignore")
+            raise RuntimeError(f"NER subprocess failed: {err}")
+        # read output
+        with open(output_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if "error" in data:
+            raise RuntimeError(data["error"])
+        return data
+    finally:
+        try:
+            os.unlink(input_file)
+        except Exception:
+            pass
+        try:
+            if os.path.exists(output_file):
+                os.unlink(output_file)
+        except Exception:
+            pass

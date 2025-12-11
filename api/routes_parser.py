@@ -14,6 +14,9 @@ from utils.task_store import TaskStore
 from model.request_schema import DocumentParseRequest, ResumeTextRequest
 from typing import Optional
 from services.ocr_service import create_doctr_ocr, dispose_doctr_ocr
+from services.parsing_service import run_ner_in_subprocess
+import asyncio
+import gc
 
 router = APIRouter()
 task_store = TaskStore()
@@ -249,8 +252,7 @@ async def extract_resume_txt(request: Request, file: UploadFile = File(...), _: 
 @router.post("/ner-extract-resume-profile")
 async def ner_extract_resume_profile(req: ResumeTextRequest, request: Request):
     """
-    Extract a structured resume profile using the single NER pipeline stored
-    as app.state.get_ner_resume_pipeline (lazy loader in main.py).
+    Use subprocess NER pipeline to avoid keeping large transformer models resident.
     """
     if not req.text or len(req.text.strip()) < 20:
         return {"error": "Input text too short or invalid."}
@@ -260,21 +262,29 @@ async def ner_extract_resume_profile(req: ResumeTextRequest, request: Request):
         details={"text_length": len(req.text)}
     )
 
+    model_res_parser = "DeezNutz1337/Resume-Parser-BERT_Based"
+
+    mem_before = None
     try:
         task_store.update_task(task_id, status="processing")
+        mem_before = None
+        try:
+            from services.ocr_service import get_memory_usage
+            mem_before = get_memory_usage()
+        except Exception:
+            pass
 
-        # Load the single resume NER pipeline (lazily cached by main.get_resume_parser)
-        ner_pipeline = request.app.state.get_ner_resume_pipeline()
+        # Run NER in a subprocess (guarantees memory freed on exit)
+        ner_out = await run_ner_in_subprocess(req.text, model_id=model_res_parser)
+        mem_peak = ner_out.get("mem_peak_mb")
+        results = ner_out.get("result", [])
 
-        # Run the pipeline once and group entities by label
-        results = ner_pipeline(req.text)
-
+        # Group entities
         def group_entities(results):
             grouped = {}
             for ent in results:
                 label = ent.get("entity_group", ent.get("entity", "UNKNOWN"))
-                # pipeline outputs may use 'word' or 'word' field; fall back safely
-                value = ent.get("word") or ent.get("word", ent.get("token", ""))
+                value = ent.get("word") or ent.get("token") or ent.get("value") or ""
                 if not value:
                     continue
                 grouped.setdefault(label, []).append(value)
@@ -285,12 +295,24 @@ async def ner_extract_resume_profile(req: ResumeTextRequest, request: Request):
 
         parsed_entities = group_entities(results)
 
+        # Aggressively delete pipeline and collect
+        try:
+            from services.ocr_service import get_memory_usage
+            mem_after = get_memory_usage()
+        except Exception:
+            mem_after = None
+
         task_store.update_task(
             task_id,
             status="completed",
-            details={"entity_types": list(parsed_entities.keys())}
+            details={
+                "entity_types": list(parsed_entities.keys()),
+                "mem_before_mb": round(mem_before,1) if mem_before else None,
+                "mem_peak_mb": round(mem_peak,1) if mem_peak else None,
+                "mem_after_mb": round(mem_after,1) if mem_after else None,
+            }
         )
-        
+
         print("DEBUG RESULTS:", parsed_entities)
 
         return {

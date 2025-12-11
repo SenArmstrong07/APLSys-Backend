@@ -17,24 +17,15 @@ from fastapi import FastAPI
 from dotenv import load_dotenv
 load_dotenv()
 
+# --- limit native BLAS/OMP threads to reduce memory/CPU pressure on startup ---
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+
 MODEL_LOCK = threading.Lock()
 
-# TrOCR models
-@lru_cache(maxsize=1)
-def get_trocr_printed():
-    """Load TrOCR model for printed text"""
-    from transformers import pipeline
-    with MODEL_LOCK:
-        print("Loading TrOCR model (printed)...")
-        return pipeline(task="image-to-text", model="microsoft/trocr-large-printed")
-
-@lru_cache(maxsize=1)
-def get_trocr_handwritten():
-    """Load TrOCR model for handwritten text"""
-    from transformers import pipeline
-    with MODEL_LOCK:
-        print("Loading TrOCR model (handwritten)...")
-        return pipeline(task="image-to-text", model="microsoft/trocr-large-handwritten")
     
 @lru_cache(maxsize=1)
 def get_resume_parser():
@@ -62,9 +53,17 @@ signal.signal(signal.SIGINT, signal_handler)
 async def lifespan(app: FastAPI):
     print("FastAPI startup - Models will load on first use (lazy loading)")
     print(f"Initial memory: {psutil.Process().memory_info().rss / 1024 / 1024:.1f}MB")
-    
+    # Set PyTorch threading limits if torch exists
+    try:
+        import torch
+        torch.set_num_threads(1)
+        torch.set_num_interop_threads(1)
+        print("Torch threads limited to 1")
+    except Exception:
+        pass
+
     yield
-    
+
     print("Shutting down...")
     cleanup_resources()
 
@@ -76,9 +75,6 @@ app.add_middleware(CORSMiddleware,
                allow_headers=["*"]
                )
 
-# Store model getters in app state
-app.state.get_trocr_printed = get_trocr_printed
-app.state.get_trocr_handwritten = get_trocr_handwritten
 app.state.get_ner_resume_pipeline = get_resume_parser
 # Note: OCR is no longer preloaded here. Doctr OCR will be created lazily
 # only when an AI request arrives and will be torn down after that request.

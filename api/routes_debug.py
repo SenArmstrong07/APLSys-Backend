@@ -169,3 +169,43 @@ async def last_ocr_peak():
         "process_rss_mb": round(get_memory_usage(), 1),
         "note": "No OCR task with memory snapshot found; returning current process RSS."
     }
+
+@router.get("/last-ner-peak")
+async def last_ner_peak():
+    """
+    Return peak RSS (MB) recorded for the most recent NER task.
+    Falls back to current process RSS if no peak recorded.
+    """
+    ts = TaskStore()
+    try:
+        tasks = ts.list_tasks(limit=200)
+    except Exception:
+        tasks = []
+
+    # Find last NER-related task
+    last_ner = None
+    for t in reversed(tasks):
+        ttype = (t.get("task_type") or "").lower()
+        if "ner" in ttype or "resume" in ttype:
+            last_ner = t
+            break
+
+    if last_ner:
+        details = last_ner.get("details", {}) or {}
+        peak = details.get("mem_peak_mb") or details.get("mem_after_mb") or details.get("mem_before_mb")
+        return {
+            "task_id": last_ner.get("id"),
+            "task_type": last_ner.get("task_type"),
+            "recorded_details": details,
+            "mem_peak_mb": peak or None,
+            "process_rss_mb": round(get_memory_usage(), 1)
+        }
+
+    return {
+        "task_id": None,
+        "task_type": None,
+        "recorded_details": None,
+        "mem_peak_mb": None,
+        "process_rss_mb": round(get_memory_usage(), 1),
+        "note": "No NER task with memory snapshot found; returning current process RSS."
+    }
