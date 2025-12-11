@@ -14,7 +14,8 @@ from services.ocr_service import (
     update_processing_status,
     create_doctr_ocr,
     dispose_doctr_ocr,
-    get_memory_usage
+    get_memory_usage,
+    _aggressive_model_unload,  # ADD THIS
 )
 from utils.task_store import TaskStore
 from utils.ocr_rate_limiter import ocr_limiter
@@ -457,6 +458,7 @@ async def _worker_process_full(content: bytes, filename: str, client_ip: str):
         except Exception:
             pass
         # cleanup temp file and predictor, release limiter slot
+        print(f"Worker full: {mem_before:.1f}MB → {mem_after:.1f}MB (delta: +{mem_after - mem_before:.1f}MB)")
         if temp_path and os.path.exists(temp_path):
             try:
                 os.remove(temp_path)
@@ -465,9 +467,18 @@ async def _worker_process_full(content: bytes, filename: str, client_ip: str):
         try:
             if predictor is not None:
                 dispose_doctr_ocr(predictor)
-        except Exception:
-            pass
-        # ensure the rate limiter slot is released
+        except Exception as e:
+            print(f"Predictor disposal error: {e}")
+        
+        # After disposing predictor, try to unload other models if memory is high
+        try:
+            current_mem = get_memory_usage()
+            if current_mem > 600:  # If still >600MB, unload transformers
+                print(f"Unloading transformer models (current: {current_mem:.1f}MB)...")
+                _aggressive_model_unload()
+        except Exception as e:
+            print(f"Model unload error: {e}")
+        
         try:
             ocr_limiter.release_request(client_ip)
         except Exception:
@@ -522,8 +533,18 @@ async def _worker_process_region(content: bytes, filename: str, client_ip: str):
         try:
             if predictor is not None:
                 dispose_doctr_ocr(predictor)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Predictor disposal error: {e}")
+        
+        # Unload models if memory is high
+        try:
+            current_mem = get_memory_usage()
+            if current_mem > 600:
+                print(f"Unloading transformer models (current: {current_mem:.1f}MB)...")
+                _aggressive_model_unload()
+        except Exception as e:
+            print(f"Model unload error: {e}")
+        
         try:
             ocr_limiter.release_request(client_ip)
         except Exception:

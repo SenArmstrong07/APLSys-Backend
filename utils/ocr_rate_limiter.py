@@ -1,15 +1,14 @@
 import time
 import threading
 from typing import Tuple, Dict
-from datetime import datetime, timedelta
+import psutil
 import logging
 
 logger = logging.getLogger(__name__)
 
 class OCRRateLimiter:
     """
-    Token bucket rate limiter specifically for OCR operations.
-    Tracks memory usage and request counts.
+    Token bucket rate limiter with aggressive memory management.
     """
     
     def __init__(
@@ -17,16 +16,16 @@ class OCRRateLimiter:
         max_requests_per_minute: int = 3,
         max_batch_files: int = 5,
         max_file_size_mb: int = 20,
-        memory_threshold_mb: int = 900
+        memory_threshold_mb: int = 700  # LOWERED from 850 to 700
     ):
         self.max_requests_per_minute = max_requests_per_minute
         self.max_batch_files = max_batch_files
         self.max_file_size_mb = max_file_size_mb
         self.memory_threshold_mb = memory_threshold_mb
+        self.memory_critical_mb = 900  # If > 900MB, force cleanup before allowing requests
         
-        # Tracking
-        self.request_times: Dict[str, list] = {}  # ip -> [timestamps]
-        self.active_requests: Dict[str, int] = {}  # ip -> count
+        self.request_times: Dict[str, list] = {}
+        self.active_requests: Dict[str, int] = {}
         self.lock = threading.Lock()
     
     def check_rate_limit(self, client_ip: str) -> Tuple[bool, str, int]:
@@ -35,6 +34,18 @@ class OCRRateLimiter:
         Returns: (allowed: bool, reason: str, retry_after_seconds: int)
         """
         now = time.time()
+        memory_mb = psutil.Process().memory_info().rss / 1024 / 1024
+        
+        # If memory is critically high, try to cleanup and retry
+        if memory_mb > self.memory_critical_mb:
+            print(f"CRITICAL MEMORY ({memory_mb:.1f}MB > {self.memory_critical_mb}MB). Forcing cleanup...")
+            try:
+                from services.ocr_service import _aggressive_model_unload
+                _aggressive_model_unload()
+                memory_mb = psutil.Process().memory_info().rss / 1024 / 1024
+                print(f"After cleanup: {memory_mb:.1f}MB")
+            except Exception as e:
+                print(f"Cleanup failed: {e}")
         
         with self.lock:
             # Cleanup old requests
@@ -56,13 +67,12 @@ class OCRRateLimiter:
                     retry_after
                 )
             
-            # Check memory
-            import psutil
+            # Check memory (re-check after potential cleanup)
             memory_mb = psutil.Process().memory_info().rss / 1024 / 1024
             if memory_mb > self.memory_threshold_mb:
                 return (
                     False,
-                    f"Server memory usage too high ({memory_mb:.0f}MB). Try again in 30s.",
+                    f"Server memory too high ({memory_mb:.0f}MB / {self.memory_threshold_mb}MB). Waiting for cleanup.",
                     30
                 )
             
@@ -107,10 +117,10 @@ class OCRRateLimiter:
         with self.lock:
             self.active_requests[client_ip] = max(0, self.active_requests.get(client_ip, 1) - 1)
 
-# Singleton instance
+# Singleton with new thresholds
 ocr_limiter = OCRRateLimiter(
     max_requests_per_minute=3,
     max_batch_files=5,
     max_file_size_mb=20,
-    memory_threshold_mb=900
+    memory_threshold_mb=700  # Lower threshold triggers earlier cleanup
 )

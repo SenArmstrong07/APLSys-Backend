@@ -488,23 +488,93 @@ def create_doctr_ocr(device: str = "cpu"):
         raise
 
 def dispose_doctr_ocr(predictor):
-    """Aggressively dispose of predictor and free memory"""
+    """
+    Aggressively dispose of predictor and force memory release.
+    """
+    if predictor is None:
+        return
+    
     try:
+        # Delete model references
         if hasattr(predictor, "model"):
             del predictor.model
         if hasattr(predictor, "det_predictor"):
             del predictor.det_predictor
         if hasattr(predictor, "reco_predictor"):
             del predictor.reco_predictor
+        if hasattr(predictor, "_model"):
+            del predictor._model
+        
+        # Clear the predictor object itself
         del predictor
+    except Exception as e:
+        print(f"Error deleting predictor: {e}")
+    
+    # Force garbage collection
+    import gc
+    gc.collect()
+    
+    # On Linux, trim malloc heap
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError, TypeError):
+        pass
+    
+    # If torch is available, empty GPU cache
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     except Exception:
         pass
     
-    gc.collect()
-    import ctypes
+    mem_after = get_memory_usage()
+    print(f"Memory after aggressive cleanup: {mem_after:.1f}MB")
+
+# Add this function to aggressively unload all transformer models
+def _aggressive_model_unload():
+    """
+    Nuclear option: unload ALL transformer pipelines and clear caches.
+    Call this when memory is high.
+    """
     try:
-        ctypes.CDLL("libc.so.6").malloc_trim(0)  # Linux-specific memory trim
-    except (OSError, AttributeError):
-        pass
-    
-    print(f"Memory after cleanup: {get_memory_usage():.1f}MB")
+        import gc
+        import importlib
+        
+        # Clear main.py model caches
+        main_mod = importlib.import_module("main")
+        for fn in ("get_trocr_printed", "get_trocr_handwritten", "get_resume_parser"):
+            f = getattr(main_mod, fn, None)
+            if f and hasattr(f, "cache_clear"):
+                try:
+                    f.cache_clear()
+                    print(f"Cleared cache: {fn}")
+                except Exception as e:
+                    print(f"Failed to clear {fn}: {e}")
+        
+        # Clear app.state references
+        app = getattr(main_mod, "app", None)
+        if app is not None:
+            for key in ("get_trocr_printed", "get_trocr_handwritten", "get_ner_resume_pipeline"):
+                if hasattr(app.state, key):
+                    try:
+                        delattr(app.state, key)
+                        print(f"Deleted app.state.{key}")
+                    except Exception:
+                        pass
+        
+        # Force GC multiple times
+        gc.collect()
+        gc.collect()
+        
+        # Try to trim memory on Linux
+        try:
+            import ctypes
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except (OSError, AttributeError, TypeError):
+            pass
+        
+        print(f"Aggressive unload complete. Memory: {get_memory_usage():.1f}MB")
+    except Exception as e:
+        print(f"Aggressive unload failed: {e}")
