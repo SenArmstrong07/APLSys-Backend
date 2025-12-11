@@ -3,9 +3,11 @@ fastapi
 certifi
 uvicorn
 transformers
-numpy<2.3.0,>=2.0
+numpy>=2.0.0,<2.3.0
 pyparse
 layoutparser[cv]
+label-studio
+label-studio-ml
 python-dotenv
 Pypdf2
 pymupdf
@@ -13,7 +15,7 @@ google-cloud-vision
 python-multipart
 tabula-py
 torch
-opencv-python-headless
+opencv-python-headless>=4.8.0,<4.12.0
 openai
 psutil
 pillow

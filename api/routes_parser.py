@@ -249,7 +249,8 @@ async def extract_resume_txt(request: Request, file: UploadFile = File(...), _: 
 @router.post("/ner-extract-resume-profile")
 async def ner_extract_resume_profile(req: ResumeTextRequest, request: Request):
     """
-    Extract a structured resume profile using your fine-tuned NER models.
+    Extract a structured resume profile using the single NER pipeline stored
+    as app.state.get_ner_resume_pipeline (lazy loader in main.py).
     """
     if not req.text or len(req.text.strip()) < 20:
         return {"error": "Input text too short or invalid."}
@@ -262,46 +263,41 @@ async def ner_extract_resume_profile(req: ResumeTextRequest, request: Request):
     try:
         task_store.update_task(task_id, status="processing")
 
-        # Access resume-ner model
-        basic_pipeline = request.app.state.ner_resume_pipeline_basic
-        semantic_pipeline = request.app.state.ner_resume_pipeline_semantic
+        # Load the single resume NER pipeline (lazily cached by main.get_resume_parser)
+        ner_pipeline = request.app.state.get_ner_resume_pipeline()
 
-        # Run both models
-        general_results = basic_pipeline(req.text)
-        semantic_results = semantic_pipeline(req.text)
+        # Run the pipeline once and group entities by label
+        results = ner_pipeline(req.text)
 
-        # Merge outputs by label
         def group_entities(results):
             grouped = {}
             for ent in results:
                 label = ent.get("entity_group", ent.get("entity", "UNKNOWN"))
-                value = ent["word"]
+                # pipeline outputs may use 'word' or 'word' field; fall back safely
+                value = ent.get("word") or ent.get("word", ent.get("token", ""))
+                if not value:
+                    continue
                 grouped.setdefault(label, []).append(value)
+            # deduplicate values
+            for k in list(grouped.keys()):
+                grouped[k] = list(dict.fromkeys([v for v in grouped[k] if v]))
             return grouped
 
-        general_entities = group_entities(general_results)
-        semantic_entities = group_entities(semantic_results)
-
-        # Combine intelligently — prioritize semantic fields
-        combined = {**general_entities, **semantic_entities}
-
-        # Join duplicates
-        for k in combined:
-            combined[k] = list(set(combined[k]))
+        parsed_entities = group_entities(results)
 
         task_store.update_task(
             task_id,
             status="completed",
-            details={"entity_types": list(combined.keys())}
+            details={"entity_types": list(parsed_entities.keys())}
         )
         
-        print("DEBUG RESULTS:", semantic_entities)
+        print("DEBUG RESULTS:", parsed_entities)
 
         return {
             "task_id": task_id,
-            "parsed_entities": semantic_entities,
+            "parsed_entities": parsed_entities,
             "summary": {
-                "entity_count": len(combined),
+                "entity_count": len(parsed_entities),
                 "text_length": len(req.text)
             }
         }

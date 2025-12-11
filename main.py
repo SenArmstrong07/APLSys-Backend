@@ -35,34 +35,15 @@ def get_trocr_handwritten():
     with MODEL_LOCK:
         print("Loading TrOCR model (handwritten)...")
         return pipeline(task="image-to-text", model="microsoft/trocr-large-handwritten")
-
-# NER models still load locally (they're smaller)
+    
 @lru_cache(maxsize=1)
-def get_ner_pipeline_basic():
-    """Load basic NER model only when first requested"""
-    from transformers import pipeline
-    with MODEL_LOCK:
-        print("Loading basic NER model (lazy)...")
-        model_basic = "DeezNutz1337/Bert-Based-Resume-Profiler_BASIC"
-        return pipeline(task="token-classification", model=model_basic, aggregation_strategy="simple")
-
-@lru_cache(maxsize=1)
-def get_ner_pipeline_semantic():
-    """Load semantic NER model only when first requested"""
-    from transformers import pipeline
-    with MODEL_LOCK:
-        print("Loading semantic NER model (lazy)...")
-        model_semantic = "DeezNutz1337/Bert-Based-Resume-Profiler_SEMANTIC"
-        return pipeline(task="token-classification", model=model_semantic, aggregation_strategy="simple")
-
-@lru_cache(maxsize=1)
-def get_ner_pipeline_general():
+def get_resume_parser():
     """Load general NER model only when first requested"""
     from transformers import pipeline
     with MODEL_LOCK:
-        print("Loading general NER model (lazy)...")
-        model_general = "dbmdz/bert-large-cased-finetuned-conll03-english"
-        return pipeline(task="token-classification", model=model_general, aggregation_strategy="simple")
+        print("Loading resume parser model (lazy)...")
+        model_res_parser = "DeezNutz1337/Resume-Parser-BERT_Based"
+        return pipeline(task="token-classification", model=model_res_parser, aggregation_strategy="simple")
 
 def cleanup_resources():
     """Cleanup before shutdown"""
@@ -98,10 +79,7 @@ app.add_middleware(CORSMiddleware,
 # Store model getters in app state
 app.state.get_trocr_printed = get_trocr_printed
 app.state.get_trocr_handwritten = get_trocr_handwritten
-app.state.get_ner_resume_pipeline_basic = get_ner_pipeline_basic
-app.state.get_ner_resume_pipeline_semantic = get_ner_pipeline_semantic
-app.state.get_general_ner_pipeline = get_ner_pipeline_general
-
+app.state.get_ner_resume_pipeline = get_resume_parser
 # Note: OCR is no longer preloaded here. Doctr OCR will be created lazily
 # only when an AI request arrives and will be torn down after that request.
 # See services.ocr_service.create_doctr_ocr and api.routes_ai.get_doctr_dependency
