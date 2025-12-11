@@ -587,9 +587,7 @@ def _ocr_subprocess_worker(input_file: str, output_file: str, dpi: int = 200):
     All memory is reclaimed when this process dies.
     """
     try:
-        import importlib
-        import sys
-        
+        import importlib, psutil, json
         # Lazy import to keep subprocess minimal
         doctr_models = importlib.import_module("doctr.models")
         from PIL import Image
@@ -631,10 +629,15 @@ def _ocr_subprocess_worker(input_file: str, output_file: str, dpi: int = 200):
                 if os.path.exists(temp_path):
                     os.remove(temp_path)
         
-        # Write result to output file
+        # after predictor is created and before processing, record peak in child
+        child_mem_before = psutil.Process().memory_info().rss / 1024 / 1024
+        # run OCR processing (existing logic) -> exported
+        # measure child peak after load / processing
+        child_mem_after = psutil.Process().memory_info().rss / 1024 / 1024
+        child_peak = max(child_mem_before, child_mem_after)
+        # write result and mem info
         with open(output_file, 'w') as f:
-            json.dump(exported, f)
-        
+            json.dump({"result": exported, "mem_peak_mb": round(child_peak,1)}, f)
         return 0
     except Exception as e:
         with open(output_file, 'w') as f:

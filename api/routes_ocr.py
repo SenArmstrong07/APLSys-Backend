@@ -428,26 +428,32 @@ async def batch_ocr(request: Request, files: List[UploadFile] = File(...), _: No
 
 # Add worker helpers that create/dispose Doctr predictor inside the worker
 async def _worker_process_full(content: bytes, filename: str, client_ip: str):
-    """
-    Run OCR in isolated subprocess to guarantee memory cleanup.
-    """
+    task_id = task_store.create_task("ocr_full", filename=filename, details={})
     mem_before = get_memory_usage()
-    
     try:
-        print(f"Starting OCR in subprocess (mem: {mem_before:.1f}MB)...")
-        
-        # Run OCR in separate process—memory is freed when process exits
+        task_store.update_task(task_id, status="processing", details={"mem_before_mb": round(mem_before,1)})
+        # run OCR (subprocess returns dict possibly containing mem_peak_mb)
         exported = await run_ocr_in_subprocess(content, filename)
-        
-        return exported
+        # exported may be {"result": ..., "mem_peak_mb": X} or the result directly
+        mem_peak = None
+        if isinstance(exported, dict) and "mem_peak_mb" in exported:
+            mem_peak = exported.get("mem_peak_mb")
+            result = exported.get("result")
+        else:
+            result = exported
+        mem_after = get_memory_usage()
+        # persist snapshots
+        task_store.update_task(task_id, status="completed", details={
+            "mem_before_mb": round(mem_before,1),
+            "mem_peak_mb": round(mem_peak,1) if mem_peak else None,
+            "mem_after_mb": round(mem_after,1),
+            "filename": filename
+        })
+        return result
     except Exception as e:
-        print(f"Subprocess OCR failed: {e}")
+        task_store.update_task(task_id, status="error", details={"error": str(e)})
         raise
     finally:
-        # No need to dispose_doctr_ocr—subprocess already exited and freed memory
-        mem_after = get_memory_usage()
-        print(f"After subprocess OCR: {mem_after:.1f}MB (delta: {mem_after - mem_before:+.1f}MB)")
-        
         try:
             ocr_limiter.release_request(client_ip)
         except Exception:
@@ -456,18 +462,28 @@ async def _worker_process_full(content: bytes, filename: str, client_ip: str):
 async def _worker_process_region(content: bytes, filename: str, client_ip: str):
     """
     Run OCR region extraction in isolated subprocess.
+    Records mem_before / mem_peak / mem_after into TaskStore.
     """
+    task_id = task_store.create_task("ocr_region", filename=filename, details={})
     mem_before = get_memory_usage()
-    
     try:
-        print(f"Starting OCR region in subprocess (mem: {mem_before:.1f}MB)...")
+        task_store.update_task(task_id, status="processing", details={"mem_before_mb": round(mem_before,1)})
         
+        print(f"Starting OCR region in subprocess (mem: {mem_before:.1f}MB)...")
         exported = await run_ocr_in_subprocess(content, filename)
+        
+        # exported may be {"result": ..., "mem_peak_mb": X} or the result directly
+        mem_peak = None
+        if isinstance(exported, dict) and "mem_peak_mb" in exported and "result" in exported:
+            mem_peak = exported.get("mem_peak_mb")
+            result = exported.get("result", {})
+        else:
+            result = exported if isinstance(exported, dict) else {}
         
         # Parse region results (same logic as before)
         text_lines = []
         confidences = []
-        for page in exported.get("pages", []):
+        for page in result.get("pages", []):
             for block in page.get("blocks", []):
                 if not isinstance(block, dict):
                     continue
@@ -489,11 +505,24 @@ async def _worker_process_region(content: bytes, filename: str, client_ip: str):
                             confidences.append(w["confidence"])
         
         avg_conf = float(sum(confidences) / len(confidences)) if confidences else 0.0
-        return {"text": "\n".join(text_lines), "confidence": avg_conf, "ocr_layer": exported}
+        mem_after = get_memory_usage()
+        
+        # persist snapshots
+        task_store.update_task(task_id, status="completed", details={
+            "mem_before_mb": round(mem_before,1),
+            "mem_peak_mb": round(mem_peak,1) if mem_peak else None,
+            "mem_after_mb": round(mem_after,1),
+            "filename": filename,
+            "text_length": len("\n".join(text_lines))
+        })
+        
+        return {"text": "\n".join(text_lines), "confidence": avg_conf, "ocr_layer": result}
+    except Exception as e:
+        task_store.update_task(task_id, status="error", details={"error": str(e)})
+        raise
     finally:
         mem_after = get_memory_usage()
         print(f"After subprocess OCR region: {mem_after:.1f}MB (delta: {mem_after - mem_before:+.1f}MB)")
-        
         try:
             ocr_limiter.release_request(client_ip)
         except Exception:
