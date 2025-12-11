@@ -16,6 +16,7 @@ from services.ocr_service import (
     dispose_doctr_ocr,
     get_memory_usage,
     _aggressive_model_unload,  # ADD THIS
+    run_ocr_in_subprocess
 )
 from utils.task_store import TaskStore
 from utils.ocr_rate_limiter import ocr_limiter
@@ -427,57 +428,25 @@ async def batch_ocr(request: Request, files: List[UploadFile] = File(...), _: No
 
 # Add worker helpers that create/dispose Doctr predictor inside the worker
 async def _worker_process_full(content: bytes, filename: str, client_ip: str):
-    predictor = None
-    temp_path = None
+    """
+    Run OCR in isolated subprocess to guarantee memory cleanup.
+    """
     mem_before = get_memory_usage()
+    
     try:
-        # record memory at job start (TaskStore update optional)
-        # create predictor in worker (memory scoped to the job)
-        predictor = create_doctr_ocr()
-        # run extraction (same logic as original endpoint)
-        doc, exported = extract_on_document(content, predictor)
-        if isinstance(doc, Image.Image):
-            import importlib, tempfile as _tempfile
-            doctr_io = importlib.import_module("doctr.io")
-            with _tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                temp_path = tmp.name
-                doc.save(temp_path)
-            doc_file = doctr_io.DocumentFile.from_images([temp_path])
-            result = await asyncio.to_thread(predictor, doc_file)
-            exported = result.export()
-        return exported
-    finally:
-        mem_after = get_memory_usage()
-        try:
-            # update task store with memory snapshot if this job has a task entry
-            task_store.update_task(
-                task_id=task_store.create_task("mem_snapshot", filename=filename),
-                status="completed",
-                details={"mem_before_mb": mem_before, "mem_after_mb": mem_after}
-            )
-        except Exception:
-            pass
-        # cleanup temp file and predictor, release limiter slot
-        print(f"Worker full: {mem_before:.1f}MB → {mem_after:.1f}MB (delta: +{mem_after - mem_before:.1f}MB)")
-        if temp_path and os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except Exception:
-                pass
-        try:
-            if predictor is not None:
-                dispose_doctr_ocr(predictor)
-        except Exception as e:
-            print(f"Predictor disposal error: {e}")
+        print(f"Starting OCR in subprocess (mem: {mem_before:.1f}MB)...")
         
-        # After disposing predictor, try to unload other models if memory is high
-        try:
-            current_mem = get_memory_usage()
-            if current_mem > 600:  # If still >600MB, unload transformers
-                print(f"Unloading transformer models (current: {current_mem:.1f}MB)...")
-                _aggressive_model_unload()
-        except Exception as e:
-            print(f"Model unload error: {e}")
+        # Run OCR in separate process—memory is freed when process exits
+        exported = await run_ocr_in_subprocess(content, filename)
+        
+        return exported
+    except Exception as e:
+        print(f"Subprocess OCR failed: {e}")
+        raise
+    finally:
+        # No need to dispose_doctr_ocr—subprocess already exited and freed memory
+        mem_after = get_memory_usage()
+        print(f"After subprocess OCR: {mem_after:.1f}MB (delta: {mem_after - mem_before:+.1f}MB)")
         
         try:
             ocr_limiter.release_request(client_ip)
@@ -485,24 +454,20 @@ async def _worker_process_full(content: bytes, filename: str, client_ip: str):
             pass
 
 async def _worker_process_region(content: bytes, filename: str, client_ip: str):
-    predictor = None
-    temp_path = None
+    """
+    Run OCR region extraction in isolated subprocess.
+    """
+    mem_before = get_memory_usage()
+    
     try:
-        predictor = create_doctr_ocr()
-        doc, result = extract_on_document(content, predictor)
-        if isinstance(doc, Image.Image):
-            import importlib, tempfile as _tempfile
-            doctr_io = importlib.import_module("doctr.io")
-            with _tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                temp_path = tmp.name
-                doc.save(temp_path)
-            doc_file = doctr_io.DocumentFile.from_images([temp_path])
-            ocr_result = await asyncio.to_thread(predictor, doc_file)
-            result = ocr_result.export()
-
+        print(f"Starting OCR region in subprocess (mem: {mem_before:.1f}MB)...")
+        
+        exported = await run_ocr_in_subprocess(content, filename)
+        
+        # Parse region results (same logic as before)
         text_lines = []
         confidences = []
-        for page in result.get("pages", []):
+        for page in exported.get("pages", []):
             for block in page.get("blocks", []):
                 if not isinstance(block, dict):
                     continue
@@ -522,28 +487,12 @@ async def _worker_process_region(content: bytes, filename: str, client_ip: str):
                     for w in words_sorted:
                         if "confidence" in w and w["confidence"] is not None:
                             confidences.append(w["confidence"])
-        avg_conf = float(sum(confidences) / len(confidences)) if confidences else 0.0
-        return {"text": "\n".join(text_lines), "confidence": avg_conf, "ocr_layer": result}
-    finally:
-        if temp_path and os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except Exception:
-                pass
-        try:
-            if predictor is not None:
-                dispose_doctr_ocr(predictor)
-        except Exception as e:
-            print(f"Predictor disposal error: {e}")
         
-        # Unload models if memory is high
-        try:
-            current_mem = get_memory_usage()
-            if current_mem > 600:
-                print(f"Unloading transformer models (current: {current_mem:.1f}MB)...")
-                _aggressive_model_unload()
-        except Exception as e:
-            print(f"Model unload error: {e}")
+        avg_conf = float(sum(confidences) / len(confidences)) if confidences else 0.0
+        return {"text": "\n".join(text_lines), "confidence": avg_conf, "ocr_layer": exported}
+    finally:
+        mem_after = get_memory_usage()
+        print(f"After subprocess OCR region: {mem_after:.1f}MB (delta: {mem_after - mem_before:+.1f}MB)")
         
         try:
             ocr_limiter.release_request(client_ip)

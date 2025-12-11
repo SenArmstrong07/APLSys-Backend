@@ -7,6 +7,8 @@ import importlib
 from dotenv import load_dotenv
 from services.ocr_service import get_memory_usage,create_doctr_ocr, dispose_doctr_ocr
 import psutil
+from utils.task_store import TaskStore
+
 router = APIRouter()
 load_dotenv()
 
@@ -124,4 +126,46 @@ async def env_check():
     return {
         "env_loaded": os.getenv("GEMINI_API_KEY") is not None,
         "models": ["ocr", "ner", "gemini"]
+    }
+
+@router.get("/last-ocr-peak")
+async def last_ocr_peak():
+    """
+    Return peak RSS (MB) recorded for the most recent OCR task.
+    Falls back to current process RSS if no per-task peak is available.
+    """
+    ts = TaskStore()
+    try:
+        tasks = ts.list_tasks(limit=200)
+    except Exception:
+        tasks = []
+
+    # Find last OCR-related task
+    last_ocr = None
+    for t in reversed(tasks):
+        ttype = (t.get("task_type") or "").lower()
+        if "ocr" in ttype or t.get("task_type", "").startswith("ocr"):
+            last_ocr = t
+            break
+
+    if last_ocr:
+        details = last_ocr.get("details", {}) or {}
+        # common memory keys we might have recorded
+        peak = details.get("mem_peak_mb") or details.get("mem_after_mb") or details.get("mem_before_mb")
+        return {
+            "task_id": last_ocr.get("id"),
+            "task_type": last_ocr.get("task_type"),
+            "recorded_details": details,
+            "mem_peak_mb": peak or None,
+            "process_rss_mb": round(get_memory_usage(), 1)
+        }
+
+    # fallback: no OCR task found or no mem info recorded
+    return {
+        "task_id": None,
+        "task_type": None,
+        "recorded_details": None,
+        "mem_peak_mb": None,
+        "process_rss_mb": round(get_memory_usage(), 1),
+        "note": "No OCR task with memory snapshot found; returning current process RSS."
     }

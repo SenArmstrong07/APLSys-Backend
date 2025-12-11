@@ -22,6 +22,8 @@ import importlib
 import gc
 import psutil
 import sys
+import subprocess
+import tempfile
 
 load_dotenv()
 
@@ -46,7 +48,7 @@ WARN_MEMORY_MB = 900  # Warning threshold
 DOCTR_DPI = 200  # Reduced from 300 for memory savings
 
 # Adjust thresholds for Doctr loading
-DOCTR_REQUIRED_MB = 150  # Memory needed to safely load DocTR (adjust based on your model)
+DOCTR_REQUIRED_MB = 170  # Memory needed to safely load DocTR (adjust based on your model)
 DOCTR_BUFFER_MB = 50    # Safety buffer after loading
 
 def update_processing_status(filename: Optional[str], status: str, error: Optional[str] = None):
@@ -578,3 +580,120 @@ def _aggressive_model_unload():
         print(f"Aggressive unload complete. Memory: {get_memory_usage():.1f}MB")
     except Exception as e:
         print(f"Aggressive unload failed: {e}")
+
+def _ocr_subprocess_worker(input_file: str, output_file: str, dpi: int = 200):
+    """
+    Subprocess worker that loads DocTR, processes the file, and exits.
+    All memory is reclaimed when this process dies.
+    """
+    try:
+        import importlib
+        import sys
+        
+        # Lazy import to keep subprocess minimal
+        doctr_models = importlib.import_module("doctr.models")
+        from PIL import Image
+        import json
+        
+        # Load DocTR in subprocess
+        detector = doctr_models.fast_small(pretrained=True)
+        recognizer = doctr_models.crnn_mobilenet_v3_small(pretrained=True)
+        
+        predictor = doctr_models.ocr_predictor(
+            det_arch=detector,
+            reco_arch=recognizer,
+            pretrained=True,
+            assume_straight_pages=True,
+        )
+        predictor = predictor.to("cpu")
+        
+        # Read input file
+        with open(input_file, 'rb') as f:
+            content = f.read()
+        
+        # Process (existing logic)
+        from PIL import Image
+        import io
+        doc = Image.open(io.BytesIO(content))
+        doc, exported = extract_on_document(content, predictor)
+        
+        # Handle image fallback
+        if isinstance(doc, Image.Image):
+            doctr_io = importlib.import_module("doctr.io")
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                temp_path = tmp.name
+                doc.save(temp_path)
+            try:
+                doc_file = doctr_io.DocumentFile.from_images([temp_path])
+                result = predictor(doc_file)
+                exported = result.export()
+            finally:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+        
+        # Write result to output file
+        with open(output_file, 'w') as f:
+            json.dump(exported, f)
+        
+        return 0
+    except Exception as e:
+        with open(output_file, 'w') as f:
+            json.dump({"error": str(e)}, f)
+        return 1
+
+async def run_ocr_in_subprocess(content: bytes, filename: str) -> dict:
+    """
+    Run OCR in isolated subprocess to guarantee memory cleanup.
+    Returns extracted OCR result.
+    """
+    import asyncio
+    import json
+    
+    # Create temp files
+    with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.pdf') as inp:
+        inp.write(content)
+        input_file = inp.name
+    
+    output_file = tempfile.mktemp(suffix='.json')
+    
+    try:
+        # Build subprocess command—use repr() to escape paths properly on Windows
+        cwd = os.getcwd()
+        code = f"""
+import sys
+sys.path.insert(0, {repr(cwd)})
+from services.ocr_service import _ocr_subprocess_worker
+exit(_ocr_subprocess_worker({repr(input_file)}, {repr(output_file)}))
+"""
+        
+        # Run in subprocess
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, '-c', code,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+        
+        if proc.returncode != 0:
+            error_msg = stderr.decode('utf-8', errors='ignore')
+            raise RuntimeError(f"OCR subprocess failed: {error_msg}")
+        
+        # Read result
+        with open(output_file, 'r') as f:
+            result = json.load(f)
+        
+        if "error" in result:
+            raise RuntimeError(result["error"])
+        
+        return result
+    finally:
+        # Cleanup temp files
+        try:
+            os.unlink(input_file)
+        except Exception:
+            pass
+        try:
+            os.unlink(output_file)
+        except Exception:
+            pass
