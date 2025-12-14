@@ -124,7 +124,7 @@ async def health_check():
 @router.get("/env-check")
 async def env_check():
     return {
-        "env_loaded": os.getenv("GEMINI_API_KEY") is not None,
+        "env_loaded": getenv("GEMINI_API_KEY") is not None,
         "models": ["ocr", "ner", "gemini"]
     }
     
