@@ -1,5 +1,5 @@
 from fastapi import APIRouter, UploadFile, File, Query, Request, Depends
-import os
+from pathlib import Path
 from doctr.io import DocumentFile
 import fitz
 from services.parsing_service import (
@@ -199,8 +199,7 @@ async def extract_resume_txt(request: Request, file: UploadFile = File(...), _: 
         
         # Read uploaded file bytes once
         file_bytes = await file.read()
-        _, ext = os.path.splitext(file.filename or "")
-        ext = ext.lower()
+        ext = Path(file.filename or "").suffix.lower()
 
         # Helper to save bytes to a temp file (used for docx / image fallbacks)
         def _save_temp(bts):
@@ -245,8 +244,8 @@ async def extract_resume_txt(request: Request, file: UploadFile = File(...), _: 
         task_store.update_task(task_id, status="error", details={"error": str(e)})
         raise
     finally:
-        if temp_path and os.path.exists(temp_path):
-            os.remove(temp_path)
+        if temp_path and Path(temp_path).exists():
+            Path(temp_path).unlink()
 
 @router.post("/ner-extract-resume-profile")
 async def ner_extract_resume_profile(req: ResumeTextRequest, request: Request):

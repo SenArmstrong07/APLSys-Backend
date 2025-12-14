@@ -1,7 +1,7 @@
 # app/routers/ai_router.py
 from fastapi import APIRouter
 import requests
-import os
+from os import getenv
 import gc
 import importlib
 from dotenv import load_dotenv
@@ -13,7 +13,7 @@ router = APIRouter()
 load_dotenv()
 
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_API_KEY = getenv("GEMINI_API_KEY")
 
 
 #Check available models

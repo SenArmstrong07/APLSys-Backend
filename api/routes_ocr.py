@@ -22,12 +22,12 @@ from utils.task_store import TaskStore
 from utils.ocr_rate_limiter import ocr_limiter
 from utils.ocr_queue import ocr_queue
 from typing import Optional
+from os import getenv
 from PIL import Image
 import numpy as np
 import cv2
 import io
 import json
-import os
 from pathlib import Path
 from typing import List, Dict, Any
 from model.request_schema import SearchRequest, TaskCreateRequest, TaskCreateBatchRequest
@@ -165,8 +165,8 @@ async def pdf_to_images_endpoint(
         base_name = Path(file.filename or "uploaded_file").stem
 
         if save:
-            meta = save_pdf_images(content, output_root=Path(os.getenv("DOCUMENTS_FOLDER", "./documents")), 
-                                 base_name=base_name, dpi=dpi)
+            meta = save_pdf_images(content, output_root=Path(getenv("DOCUMENTS_FOLDER", "./documents")), 
+                                  base_name=base_name, dpi=dpi)
             task_store.update_task(
                 task_id, 
                 status="completed",
@@ -287,9 +287,9 @@ async def process_folder(request: Request, files: List[UploadFile] = File(...), 
                 })
             finally:
                 # Clean up temp file
-                if "temp_path" in locals() and temp_path and os.path.exists(temp_path):
+                if "temp_path" in locals() and temp_path and Path(temp_path).exists():
                     try:
-                        os.remove(temp_path)
+                        Path(temp_path).unlink()
                     except Exception:
                         pass
             
@@ -410,9 +410,9 @@ async def batch_ocr(request: Request, files: List[UploadFile] = File(...), _: No
                 results.append({"filename": file.filename, "error": str(e)})
             finally:
                 # Clean up temp file
-                if temp_path and os.path.exists(temp_path):
+                if temp_path and Path(temp_path).exists():
                     try:
-                        os.remove(temp_path)
+                        Path(temp_path).unlink()
                     except Exception:
                         pass
                 ocr_limiter.release_request(client_ip)

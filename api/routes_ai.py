@@ -1,7 +1,7 @@
 from fastapi import APIRouter, UploadFile, File, Form, Query, HTTPException, Request, status
 from model.request_schema import ClassifyRequest, ResumeAnalysisRequest
 import requests
-import os
+from os import getenv
 import time
 import threading
 import re
@@ -28,7 +28,7 @@ load_dotenv()
 
 GEMINI_MODEL = "gemini-2.5-flash"
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_API_KEY = getenv("GEMINI_API_KEY")
 
 GEMINI_RATE_LIMIT_LOCK = threading.Lock()
 GEMINI_LAST_CALL_TIME = 0.0
@@ -381,8 +381,8 @@ async def analyze_resume(req: ResumeAnalysisRequest, request: Request):
 
     prompt = build_prompt(req)
     extra_headers = {
-        "HTTP-Referer": os.getenv("OPENROUTER_REFERER", "http://localhost:3000"),
-        "X-Title": os.getenv("OPENROUTER_TITLE", "Resume Analyzer"),
+        "HTTP-Referer": getenv("OPENROUTER_REFERER", "http://localhost:3000"),
+        "X-Title": getenv("OPENROUTER_TITLE", "Resume Analyzer"),
     }
 
     try:

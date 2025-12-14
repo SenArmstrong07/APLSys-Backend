@@ -1,11 +1,11 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
 
 #AI Requests
 class ResumeAnalysisRequest(BaseModel):
     resume: str
-    job_role: Optional[str] = None
-    job_description: Optional[str] = None
+    job_role: Optional[str] = Field(None, alias="not")
+    job_description: Optional[str] = Field(None, alias="not")
 
 class PromptRequest(BaseModel):
     prompt: str
@@ -37,11 +37,11 @@ class TextRequest(BaseModel):
     
 class TaskCreateRequest(BaseModel):
     task_type: str
-    filename: Optional[str] = None
-    details: Optional[Dict[str, Any]] = None
+    filename: Optional[str] = Field(None, alias="not")
+    details: Optional[Dict[str, Any]] = Field(None, alias="not")
     
 class TaskCreateBatchRequest(BaseModel):
     task_type: str
-    files: Optional[List[str]] = None
-    filename: Optional[str] = None
-    details: Optional[Dict[str, Any]] = None
+    files: Optional[List[str]] = Field(None, alias="not")
+    filename: Optional[str] = Field(None, alias="not")
+    details: Optional[Dict[str, Any]] = Field(None, alias="not")
