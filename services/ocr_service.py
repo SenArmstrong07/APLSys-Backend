@@ -21,6 +21,7 @@ import numpy as np
 import importlib
 import gc
 import psutil
+from utils.mem_bar import memory_bar
 import sys
 import subprocess
 import tempfile
@@ -483,6 +484,13 @@ def create_doctr_ocr(device: str = "cpu"):
             predictor = predictor.to("cpu")
             
         mem_after = get_memory_usage()
+        model_size = max(0.0, mem_after - current_mem)
+        # register model footprint in memory bar (best-effort estimate)
+        try:
+            memory_bar.register("doctr", round(model_size, 1))
+        except Exception:
+            pass
+
         print(f"Doctr loaded. Memory: {mem_after:.1f}MB (delta: +{mem_after - current_mem:.1f}MB)")
         return predictor
     except Exception as e:
@@ -531,6 +539,12 @@ def dispose_doctr_ocr(predictor):
     except Exception:
         pass
     
+    # unregister from memory bar (best-effort)
+    try:
+        memory_bar.unregister("doctr")
+    except Exception:
+        pass
+
     mem_after = get_memory_usage()
     print(f"Memory after aggressive cleanup: {mem_after:.1f}MB")
 

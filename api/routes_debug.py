@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from services.ocr_service import get_memory_usage,create_doctr_ocr, dispose_doctr_ocr
 import psutil
 from utils.task_store import TaskStore
-
+from utils.mem_bar import memory_bar
 router = APIRouter()
 load_dotenv()
 
@@ -127,6 +127,18 @@ async def env_check():
         "env_loaded": os.getenv("GEMINI_API_KEY") is not None,
         "models": ["ocr", "ner", "gemini"]
     }
+    
+    
+
+@router.get("/memory-bar")
+async def memory_bar_status():
+    """
+    Return the current MemoryBar accounting (cap, used, percent, items).
+    """
+    try:
+        return memory_bar.get_usage()
+    except Exception as e:
+        return {"error": str(e)}
 
 @router.get("/last-ocr-peak")
 async def last_ocr_peak():

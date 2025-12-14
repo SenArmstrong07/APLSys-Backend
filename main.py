@@ -15,6 +15,7 @@ except Exception:
     pass
 from fastapi import FastAPI
 from dotenv import load_dotenv
+from utils.mem_bar import memory_bar
 load_dotenv()
 
 # --- limit native BLAS/OMP threads to reduce memory/CPU pressure on startup ---
@@ -33,13 +34,25 @@ def get_resume_parser():
     from transformers import pipeline
     with MODEL_LOCK:
         print("Loading resume parser model (lazy)...")
+        mem_before = psutil.Process().memory_info().rss / 1024 / 1024
         model_res_parser = "DeezNutz1337/Resume-Parser-BERT_Based"
-        return pipeline(task="token-classification", model=model_res_parser, aggregation_strategy="simple")
+        p = pipeline(task="token-classification", model=model_res_parser, aggregation_strategy="simple", device=-1)
+        mem_after = psutil.Process().memory_info().rss / 1024 / 1024
+        model_size = max(0.0, mem_after - mem_before)
+        try:
+            memory_bar.register("resume_ner", round(model_size, 1))
+        except Exception:
+            pass
+        return p
 
 def cleanup_resources():
     """Cleanup before shutdown"""
     import gc
     gc.collect()
+    try:
+        memory_bar.clear_all()
+    except Exception:
+        pass
     print("Resources cleaned up")
     
 def signal_handler(sig, frame):
@@ -76,9 +89,6 @@ app.add_middleware(CORSMiddleware,
                )
 
 app.state.get_ner_resume_pipeline = get_resume_parser
-# Note: OCR is no longer preloaded here. Doctr OCR will be created lazily
-# only when an AI request arrives and will be torn down after that request.
-# See services.ocr_service.create_doctr_ocr and api.routes_ai.get_doctr_dependency
 
 # Register API routes
 app.include_router(routes_ocr.router, prefix="/ocr", tags=["OCR"])
