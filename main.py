@@ -1,6 +1,6 @@
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
-from api import routes_ocr, routes_ai, routes_debug, routes_parser
+import importlib
 import uvicorn as uv
 import os
 from functools import lru_cache
@@ -90,7 +90,11 @@ app.add_middleware(CORSMiddleware,
 
 app.state.get_ner_resume_pipeline = get_resume_parser
 
-# Register API routes
+# Lazy-import and register routes (reduces startup time / avoids importing heavy libs on import)
+routes_ocr = importlib.import_module("api.routes_ocr")
+routes_ai = importlib.import_module("api.routes_ai")
+routes_debug = importlib.import_module("api.routes_debug")
+routes_parser = importlib.import_module("api.routes_parser")
 app.include_router(routes_ocr.router, prefix="/ocr", tags=["OCR"])
 app.include_router(routes_ai.router, prefix="/ai", tags=["AI"])
 app.include_router(routes_debug.router, prefix="/debug", tags=["DEBUG"])
