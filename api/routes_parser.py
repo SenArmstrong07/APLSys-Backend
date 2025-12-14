@@ -1,5 +1,4 @@
 from fastapi import APIRouter, UploadFile, File, Query, Request, Depends
-import pandas as pd
 import os
 from doctr.io import DocumentFile
 import fitz
@@ -52,43 +51,43 @@ async def get_task(task_id: int):
     except KeyError:
         return {"error": "Task not found"}
 
-@router.post("/tabula_extract")
-async def tabula_extract(file: UploadFile = File(...), pages: Optional[str] = Query("all")):
-    task_id = task_store.create_task(
-        task_type="tabula_extract",
-        filename=file.filename,
-        details={"pages": pages}
-    )
+# @router.post("/tabula_extract")
+# async def tabula_extract(file: UploadFile = File(...), pages: Optional[str] = Query("all")):
+#     task_id = task_store.create_task(
+#         task_type="tabula_extract",
+#         filename=file.filename,
+#         details={"pages": pages}
+#     )
     
-    try:
-        task_store.update_task(task_id, status="processing")
-        # Save uploaded file temporarily
-        temp_path = f"temp_{file.filename}"
-        with open(temp_path, "wb") as f:
-            f.write(await file.read())
+#     try:
+#         task_store.update_task(task_id, status="processing")
+#         # Save uploaded file temporarily
+#         temp_path = f"temp_{file.filename}"
+#         with open(temp_path, "wb") as f:
+#             f.write(await file.read())
             
-        tables = extract_tables_from_pdf(temp_path, pages=pages if pages is not None else "all")
+#         tables = extract_tables_from_pdf(temp_path, pages=pages if pages is not None else "all")
         
-        # Convert tables to JSON for API response
-        tables_json = []
-        for table in tables:
-            if isinstance(table, pd.DataFrame):
-                tables_json.append(table.to_dict(orient="records"))
-            else:
-                tables_json.append(table)
+#         # Convert tables to JSON for API response
+#         tables_json = []
+#         for table in tables:
+#             if isinstance(table, pd.DataFrame):
+#                 tables_json.append(table.to_dict(orient="records"))
+#             else:
+#                 tables_json.append(table)
                 
-        task_store.update_task(
-            task_id, 
-            status="completed",
-            details={"table_count": len(tables_json)}
-        )
-        return {"tables": tables_json, "task_id": task_id}
-    except Exception as e:
-        task_store.update_task(task_id, status="error", details={"error": str(e)})
-        raise
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+#         task_store.update_task(
+#             task_id, 
+#             status="completed",
+#             details={"table_count": len(tables_json)}
+#         )
+#         return {"tables": tables_json, "task_id": task_id}
+#     except Exception as e:
+#         task_store.update_task(task_id, status="error", details={"error": str(e)})
+#         raise
+#     finally:
+#         if os.path.exists(temp_path):
+#             os.remove(temp_path)
 
 # @router.post("/camelot_extract")
 # async def camelot_extract(file: UploadFile = File(...), pages: Optional[str] = Query("all")):
