@@ -6,10 +6,13 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 # Install system dependencies required for OpenCV, DocTR, and PDF/image handling
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 \
     libjpeg-dev zlib1g libxml2 poppler-utils \
- && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+    libpq-dev build-essential gcc pkg-config \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
 
 # Set working directory
 WORKDIR /app
