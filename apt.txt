@@ -8,5 +8,5 @@ zlib1g
 ghostscript
 libxml2
 libxslt1.1
-openjdk-11-jre
+# openjdk removed (tabula/camelot not installed)
 poppler-utils

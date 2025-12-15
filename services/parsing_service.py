@@ -1,8 +1,6 @@
-import layoutparser as lp
 #from camelot.io import read_pdf as camelot_read_pdf
 from tabula.io import read_pdf
 from docx import Document
-import pandas as pd
 import re
 from typing import Dict, List
 import os
