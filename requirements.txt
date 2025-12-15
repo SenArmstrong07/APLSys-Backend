@@ -8,6 +8,8 @@ pyparse
 python-dotenv
 Pypdf2
 pymupdf
+pdf2image==1.16.0
+poppler-utils
 google-cloud-vision
 python-multipart
 torch
