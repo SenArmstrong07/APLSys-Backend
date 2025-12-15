@@ -556,6 +556,27 @@ async def extract_text_full(ocrreq: Request, file: UploadFile = File(...)):
         task_store.update_task(task_id, status="processing")
         content = await file.read()
 
+        # Attempt to read rotation from multipart form (defaults to 0)
+        try:
+            form = await ocrreq.form()
+            rotation_value = form.get("rotation", 0)
+            rotation = float(str(rotation_value)) if rotation_value else 0.0
+        except Exception:
+            rotation = 0.0
+
+        # If rotation provided and the uploaded bytes are an image, straighten before OCR
+        if rotation and rotation % 360 != 0:
+            try:
+                img = Image.open(io.BytesIO(content))
+                # Frontend rotation indicates how much the image was rotated; rotate by negative to straighten
+                straight = img.rotate(-rotation, expand=True)
+                buf = io.BytesIO()
+                straight.save(buf, format="PNG", optimize=True)
+                content = buf.getvalue()
+            except Exception:
+                # If not an image (e.g., PDF), skip rotation and continue
+                pass
+
         # Submit job to the OCR queue; worker creates/disposes predictor
         exported = await ocr_queue.submit(_worker_process_full, content, file.filename or "uploaded", client_ip)
 
@@ -568,6 +589,9 @@ async def extract_text_full(ocrreq: Request, file: UploadFile = File(...)):
     except Exception as e:
         task_store.update_task(task_id, status="error", details={"error": str(e)})
         raise
+    finally:
+        # no local temp files here (cleanup handled elsewhere)
+        pass
 
 @router.post("/extract-region")
 async def extract_text_region(ocrreq: Request, file: UploadFile = File(...)):
@@ -595,6 +619,26 @@ async def extract_text_region(ocrreq: Request, file: UploadFile = File(...)):
     try:
         task_store.update_task(task_id, status="processing")
         content = await file.read()
+
+        # Read rotation field from multipart form if present
+        try:
+            form = await ocrreq.form()
+            rotation_value = form.get("rotation", 0)
+            rotation = float(str(rotation_value)) if rotation_value else 0.0
+        except Exception:
+            rotation = 0.0
+
+        # If rotation present, try to straighten image bytes before handing to subprocess
+        if rotation and rotation % 360 != 0:
+            try:
+                img = Image.open(io.BytesIO(content))
+                straight = img.rotate(-rotation, expand=True)
+                buf = io.BytesIO()
+                straight.save(buf, format="PNG", optimize=True)
+                content = buf.getvalue()
+            except Exception:
+                # Not an image (e.g., PDF) — skip rotation
+                pass
 
         # Submit to queue; worker returns text + confidence
         result = await ocr_queue.submit(_worker_process_region, content, file.filename or "uploaded", client_ip)
