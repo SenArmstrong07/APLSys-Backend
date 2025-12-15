@@ -3,7 +3,7 @@ from pathlib import Path
 from doctr.io import DocumentFile
 import fitz
 from services.parsing_service import (
-    extract_tables_from_pdf,
+    #extract_tables_from_pdf,
     #extract_tables_from_pdf_with_camelot,
     #extract_tables_from_docx_with_camelot,
     export_tables_to_csv,
