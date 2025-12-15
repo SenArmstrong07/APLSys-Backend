@@ -1,5 +1,5 @@
 #from camelot.io import read_pdf as camelot_read_pdf
-from tabula.io import read_pdf
+# from tabula.io import read_pdf
 from docx import Document
 import re
 from typing import Dict, List
@@ -191,14 +191,14 @@ def parse_document_text(path: str, ocr_model) -> str:
     except Exception:
         raise RuntimeError(f"Unsupported file type or extraction failed for: {path}")
 
-def extract_tables_from_pdf(pdf_path, pages="all"):
-    """
-    Extract tables from a PDF using tabula-py.
-    Returns a list of pandas DataFrames, one for each table found.
-    """
-    # Read tables from PDF
-    tables = read_pdf(pdf_path, pages=pages, multiple_tables=True)
-    return tables
+# def extract_tables_from_pdf(pdf_path, pages="all"):
+#     """
+#     Extract tables from a PDF using tabula-py.
+#     Returns a list of pandas DataFrames, one for each table found.
+#     """
+#     # Read tables from PDF
+#     tables = read_pdf(pdf_path, pages=pages, multiple_tables=True)
+#     return tables
 
 # def extract_tables_from_pdf_with_camelot(pdf_path, pages="all"):
 #     """
