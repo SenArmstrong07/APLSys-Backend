@@ -2,7 +2,7 @@
 # from tabula.io import read_pdf
 from docx import Document
 import re
-from typing import Dict, List
+from typing import Dict, List, Any, cast
 import os
 import fitz
 from doctr.io import DocumentFile
@@ -326,7 +326,7 @@ def _ner_subprocess_worker(input_file: str, output_file: str, model_id: str):
 
         mem_before = psutil.Process().memory_info().rss / 1024 / 1024
         p = pipeline(task="token-classification", model=model_id, aggregation_strategy="simple", device=-1)
-        res = p(text)
+        res = cast(list[dict[str, Any]], p(text))
         mem_after = psutil.Process().memory_info().rss / 1024 / 1024
         mem_peak = max(mem_before, mem_after)
 
