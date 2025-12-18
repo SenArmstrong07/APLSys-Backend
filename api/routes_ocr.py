@@ -1,5 +1,5 @@
 # app/routers/ocr_router.py
-from fastapi import APIRouter, UploadFile, File, Query, Request, HTTPException, Depends
+from fastapi import APIRouter, UploadFile, File, Query, Request, HTTPException, Depends, Form
 from services.ocr_service import (
     run_ocr,
     extract_on_document,
@@ -15,13 +15,15 @@ from services.ocr_service import (
     create_doctr_ocr,
     dispose_doctr_ocr,
     get_memory_usage,
-    _aggressive_model_unload,  # ADD THIS
+    _aggressive_model_unload,
+    bbox_to_original,
+    intersects,
     run_ocr_in_subprocess
 )
 from utils.task_store import TaskStore
 from utils.ocr_rate_limiter import ocr_limiter
 from utils.ocr_queue import ocr_queue
-from typing import Optional
+from typing import Optional, cast
 from os import getenv
 from PIL import Image
 import numpy as np
@@ -33,6 +35,8 @@ from typing import List, Dict, Any
 from model.request_schema import SearchRequest, TaskCreateRequest, TaskCreateBatchRequest
 import asyncio
 import tempfile
+import base64
+import requests
 
 task_store = TaskStore()
 
@@ -459,28 +463,31 @@ async def _worker_process_full(content: bytes, filename: str, client_ip: str):
         except Exception:
             pass
 
-async def _worker_process_region(content: bytes, filename: str, client_ip: str):
+async def _worker_process_region(content: bytes, filename: str, client_ip: str, region: dict):
     """
     Run OCR region extraction in isolated subprocess.
     Records mem_before / mem_peak / mem_after into TaskStore.
+    region: normalized bbox in original-image space {"x","y","width","height"} or None
     """
     task_id = task_store.create_task("ocr_region", filename=filename, details={})
     mem_before = get_memory_usage()
     try:
         task_store.update_task(task_id, status="processing", details={"mem_before_mb": round(mem_before,1)})
-        
+
         print(f"Starting OCR region in subprocess (mem: {mem_before:.1f}MB)...")
         exported = await run_ocr_in_subprocess(content, filename)
-        
+
         # exported may be {"result": ..., "mem_peak_mb": X} or the result directly
         mem_peak = None
         if isinstance(exported, dict) and "mem_peak_mb" in exported and "result" in exported:
             mem_peak = exported.get("mem_peak_mb")
             result = exported.get("result", {})
+        elif isinstance(exported, dict) and "pages" in exported:
+            result = exported
         else:
-            result = exported if isinstance(exported, dict) else {}
-        
-        # Parse region results (same logic as before)
+            result = {}
+
+        # Parse region results (filter words by region if provided)
         text_lines = []
         confidences = []
         for page in result.get("pages", []):
@@ -489,24 +496,45 @@ async def _worker_process_region(content: bytes, filename: str, client_ip: str):
                     continue
                 for line in block.get("lines", []):
                     words = line.get("words", []) or []
+
                     # preserve left-to-right order if geometry exists
                     def _word_x(w):
-                        geom = w.get("geometry") or []
+                        geom = w.get("geometry")
+                        if not geom:
+                            return 0.0
                         if isinstance(geom, list) and len(geom) and isinstance(geom[0], list):
                             xs = [pt[0] for pt in geom if isinstance(pt, list) and len(pt) >= 2]
                             return min(xs) if xs else 0.0
                         return 0.0
-                    words_sorted = sorted(words, key=_word_x)
-                    line_text = " ".join([w.get("value", "") for w in words_sorted]).strip()
+
+                    # If region provided, filter words by intersection
+                    if region:
+                        filtered = []
+                        for w in words:
+                            geom = w.get("geometry")
+                            if geom and intersects(geom, region):
+                                filtered.append(w)
+                        words = filtered
+
+                    line_text = " ".join([w.get("value", "") for w in words]).strip()
                     if line_text:
                         text_lines.append(line_text)
-                    for w in words_sorted:
+                    for w in words:
                         if "confidence" in w and w["confidence"] is not None:
                             confidences.append(w["confidence"])
-        
-        avg_conf = float(sum(confidences) / len(confidences)) if confidences else 0.0
+        total = 0.0
+        weight = 0.0
+
+        for w in words:
+            conf = w.get("confidence")
+            if conf is not None:
+                length = max(len(w.get("value", "")), 1)
+                total += conf * length
+                weight += length
+
+        avg_conf = round(total / weight, 2) if weight else 0.0
         mem_after = get_memory_usage()
-        
+
         # persist snapshots
         task_store.update_task(task_id, status="completed", details={
             "mem_before_mb": round(mem_before,1),
@@ -515,7 +543,7 @@ async def _worker_process_region(content: bytes, filename: str, client_ip: str):
             "filename": filename,
             "text_length": len("\n".join(text_lines))
         })
-        
+
         return {"text": "\n".join(text_lines), "confidence": avg_conf, "ocr_layer": result}
     except Exception as e:
         task_store.update_task(task_id, status="error", details={"error": str(e)})
@@ -594,7 +622,15 @@ async def extract_text_full(ocrreq: Request, file: UploadFile = File(...)):
         pass
 
 @router.post("/extract-region")
-async def extract_text_region(ocrreq: Request, file: UploadFile = File(...)):
+async def extract_text_region(
+    ocrreq: Request,
+    file: UploadFile = File(...),
+    rotation: float = Form(0.0),
+    bbox_x: Optional[float] = Form(None),
+    bbox_y: Optional[float] = Form(None),
+    bbox_w: Optional[float] = Form(None),
+    bbox_h: Optional[float] = Form(None),
+):
     task_id = task_store.create_task(
         task_type="extract_region",
         filename=file.filename
@@ -608,7 +644,6 @@ async def extract_text_region(ocrreq: Request, file: UploadFile = File(...)):
 
     # file size guard
     size = getattr(file, "size", None)
-    
     if size is not None:
         ok, msg = ocr_limiter.check_file_size(size)
         if not ok:
@@ -620,28 +655,163 @@ async def extract_text_region(ocrreq: Request, file: UploadFile = File(...)):
         task_store.update_task(task_id, status="processing")
         content = await file.read()
 
-        # Read rotation field from multipart form if present
+        # Read rotation and bbox from multipart form fields if present.
         try:
-            form = await ocrreq.form()
-            rotation_value = form.get("rotation", 0)
-            rotation = float(str(rotation_value)) if rotation_value else 0.0
+            # Prefer explicit Form params (handled by FastAPI). If not present, try parsing the raw form.
+            def _read_from_parsed_form():
+                nonlocal rotation, bbox_x, bbox_y, bbox_w, bbox_h
+                # already set by Form defaults if provided; nothing to change
+                return
+
+            if bbox_x is None and bbox_y is None and bbox_w is None and bbox_h is None:
+                # fallback: parse raw multipart form (compatible with older callers)
+                form = await ocrreq.form()
+                rotation_value = form.get("rotation", rotation)
+                rotation = float(str(rotation_value)) if rotation_value else rotation
+
+                def get_float(form, name: str) -> Optional[float]:
+                    v = form.get(name)
+                    if v is None:
+                        return None
+                    if isinstance(v, UploadFile):
+                        return None
+                    try:
+                        return float(v)
+                    except (TypeError, ValueError):
+                        return None
+
+                if bbox_x is None: bbox_x = get_float(form, "bbox_x")
+                if bbox_y is None: bbox_y = get_float(form, "bbox_y")
+                if bbox_w is None: bbox_w = get_float(form, "bbox_w")
+                if bbox_h is None: bbox_h = get_float(form, "bbox_h")
+
+            # clamp helper
+            def clamp01(x: float) -> float:
+                return max(0.0, min(1.0, x))
+
+            if None not in (bbox_x, bbox_y, bbox_w, bbox_h):
+                bx_raw = cast(float, bbox_x)
+                by_raw = cast(float, bbox_y)
+                bw_raw = cast(float, bbox_w)
+                bh_raw = cast(float, bbox_h)
+
+                # If UI sent pixel coordinates (values > 1), normalize using the
+                # rotated canvas dimensions that the frontend used (swap w/h for 90/270).
+                bx = bx_raw
+                by = by_raw
+                bw = bw_raw
+                bh = bh_raw
+                try:
+                    if max(bx_raw, by_raw, bw_raw, bh_raw) > 1.5:
+                        import io as _io
+                        from PIL import Image as PILImage
+                        img = PILImage.open(_io.BytesIO(content))
+                        img_w, img_h = img.size  # original (natural) image dims
+                        rot = int(round(rotation)) % 360
+                        if rot in (90, 270):
+                            rot_w, rot_h = img_h, img_w
+                        else:
+                            rot_w, rot_h = img_w, img_h
+                        if rot_w > 0 and rot_h > 0:
+                            bx = bx_raw / rot_w
+                            by = by_raw / rot_h
+                            bw = bw_raw / rot_w
+                            bh = bh_raw / rot_h
+                except Exception:
+                    # fallback: leave raw values (assume they were already normalized)
+                    bx = bx_raw
+                    by = by_raw
+                    bw = bw_raw
+                    bh = bh_raw
+
+                bbox = {
+                    "x": clamp01(bx),
+                    "y": clamp01(by),
+                    "width": clamp01(bw),
+                    "height": clamp01(bh),
+                }
+            else:
+                # NO bbox provided → treat upload as a client-side cropped image.
+                # Do not re-orient or remap bytes; run OCR on entire uploaded image.
+                bbox = None
         except Exception:
-            rotation = 0.0
+            rotation = rotation or 0.0
+            bbox = None
 
-        # If rotation present, try to straighten image bytes before handing to subprocess
-        if rotation and rotation % 360 != 0:
+        # Normalize rotation to canonical quarter-turn value (used only when remapping bbox)
+        rotation = int(round(rotation)) % 360
+        if rotation not in (0, 90, 180, 270):
+            rotation = 0
+
+        # If bbox is None we assume the client already cropped/straightened the image.
+        # In that case do NOT call bbox_to_original and do not rotate the bytes on server.
+        if bbox is None:
+            bbox_orig = None
+        else:
+            # Convert incoming bbox (which is in UI rotation-space) back to original-image normalized coords
+            bbox_orig = bbox_to_original(bbox, rotation)
+
+        # NEW: If image is rotated and a CLOUD_VISION secret is configured, prefer Google Vision
+        vision_key = getenv("CLOUD_VISION_API") or None
+        if rotation != 0 and vision_key:
             try:
-                img = Image.open(io.BytesIO(content))
-                straight = img.rotate(-rotation, expand=True)
-                buf = io.BytesIO()
-                straight.save(buf, format="PNG", optimize=True)
-                content = buf.getvalue()
-            except Exception:
-                # Not an image (e.g., PDF) — skip rotation
-                pass
+                # straighten image server-side, crop if bbox provided, then call Vision
+                import io as _io
+                from PIL import Image as PILImage
 
-        # Submit to queue; worker returns text + confidence
-        result = await ocr_queue.submit(_worker_process_region, content, file.filename or "uploaded", client_ip)
+                img = PILImage.open(_io.BytesIO(content)).convert("RGB")
+                straight = img.rotate(-rotation, expand=True) if rotation else img
+
+                # If bbox provided, assume bbox is normalized (0..1) in UI rotation-space.
+                if bbox is not None:
+                    w, h = straight.size
+                    sx = max(0, min(int(round(bbox["x"] * w)), w - 1))
+                    sy = max(0, min(int(round(bbox["y"] * h)), h - 1))
+                    sw = max(1, min(int(round(bbox["width"] * w)), w - sx))
+                    sh = max(1, min(int(round(bbox["height"] * h)), h - sy))
+                    crop = straight.crop((sx, sy, sx + sw, sy + sh))
+                else:
+                    crop = straight
+
+                buf = _io.BytesIO()
+                crop.save(buf, format="PNG", optimize=True)
+                img_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+
+                url = f"https://vision.googleapis.com/v1/images:annotate?key={vision_key}"
+                payload = {
+                    "requests": [
+                        {
+                            "image": {"content": img_b64},
+                            "features": [{"type": "TEXT_DETECTION", "maxResults": 1}]
+                        }
+                    ]
+                }
+                resp = requests.post(url, json=payload, timeout=30)
+                resp.raise_for_status()
+                data = resp.json()
+                resp0 = data.get("responses", [{}])[0]
+                text = (resp0.get("fullTextAnnotation", {}) or {}).get("text") or (resp0.get("textAnnotations", [{}])[0].get("description", "")) or ""
+                # try to compute a confidence if available in fullTextAnnotation pages/words
+                conf = 0.0
+                confidences = []
+                for page in (resp0.get("fullTextAnnotation", {}) or {}).get("pages", []):
+                    for block in page.get("blocks", []):
+                        for paragraph in block.get("paragraphs", []):
+                            for word in paragraph.get("words", []):
+                                wc = word.get("confidence")
+                                if wc is not None:
+                                    confidences.append(wc)
+                if confidences:
+                    conf = sum(confidences) / len(confidences)
+
+                task_store.update_task(task_id, status="completed", details={"text_length": len(text)})
+                return {"text": text or "", "confidence": round(conf, 2), "task_id": task_id}
+            except Exception as e:
+                # If Vision fails, fall back to existing DocTR worker path
+                print("Google Vision path failed, falling back to DocTR:", e)
+
+        # Submit to queue; worker returns text + confidence (existing flow)
+        result = await ocr_queue.submit(_worker_process_region, content, file.filename or "uploaded", client_ip, bbox_orig)
 
         # Update task and return the extracted text with confidence
         task_store.update_task(

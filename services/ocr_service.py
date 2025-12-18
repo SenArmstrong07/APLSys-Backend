@@ -436,6 +436,73 @@ def _free_transformer_model_caches():
         # non-fatal; just continue
         pass
 
+
+    
+# (convert bbox based on rotation and normalized coords)
+def bbox_to_original(bbox: dict, rotation: float) -> dict:
+    """
+    Convert a normalized bbox from UI rotation-space back to original image-space.
+    bbox expected: {"x":.., "y":.., "width":.., "height":..} with values in [0..1] (normalized).
+    rotation: degrees normalized to [0,360).
+    """
+    try:
+        r = int(rotation) % 360
+    except Exception:
+        r = 0
+    x, y, w, h = bbox.get("x", 0), bbox.get("y", 0), bbox.get("width", 0), bbox.get("height", 0)
+
+    if r == 90:
+        return {
+            "x": y,
+            "y": 1 - x - w,
+            "width": h,
+            "height": w,
+        }
+    elif r == 180:
+        return {
+            "x": 1 - x - w,
+            "y": 1 - y - h,
+            "width": w,
+            "height": h,
+        }
+    elif r == 270:
+        return {
+            "x": 1 - y - h,
+            "y": x,
+            "width": h,
+            "height": w,
+        }
+    return {"x": x, "y": y, "width": w, "height": h}
+
+
+def intersects(word_geom: list, region: dict) -> bool:
+    """
+    word_geom: list of points [[x0,y0], [x1,y1], ...] (normalized or absolute)
+    region: normalized bbox {"x","y","width","height"} in same coordinate space as word_geom
+    Returns True if bounding boxes intersect.
+    """
+    if (
+        not isinstance(word_geom, list)
+        or len(word_geom) != 2
+        or not all(isinstance(pt, list) and len(pt) >= 2 for pt in word_geom)
+    ):
+        return False
+
+    x0, y0 = word_geom[0][:2]
+    x1, y1 = word_geom[1][:2]
+
+    rx0 = region["x"]
+    ry0 = region["y"]
+    rx1 = rx0 + region["width"]
+    ry1 = ry0 + region["height"]
+
+    return not (
+        x1 < rx0 or
+        x0 > rx1 or
+        y1 < ry0 or
+        y0 > ry1
+    )
+
 # Modify create_doctr_ocr to be memory-aware
 def create_doctr_ocr(device: str = "cpu"):
     """
@@ -477,7 +544,7 @@ def create_doctr_ocr(device: str = "cpu"):
             det_arch=detector,
             reco_arch=recognizer,
             pretrained=True,
-            assume_straight_pages=True,
+            assume_straight_pages=False,
         )
         
         if device == "cpu":
