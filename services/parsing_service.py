@@ -353,7 +353,7 @@ async def run_ner_in_subprocess(text: str, model_id: str = "DeezNutz1337/Resume-
         code = f"""
 import sys
 sys.path.insert(0, {repr(cwd)})
-from services.ner_service import _ner_subprocess_worker
+from services.parsing_service import _ner_subprocess_worker
 exit(_ner_subprocess_worker({repr(input_file)}, {repr(output_file)}, {repr(model_id)}))
 """
         proc = await asyncio.create_subprocess_exec(
