@@ -3,9 +3,6 @@ from pathlib import Path
 from doctr.io import DocumentFile
 import fitz
 from services.parsing_service import (
-    #extract_tables_from_pdf,
-    #extract_tables_from_pdf_with_camelot,
-    #extract_tables_from_docx_with_camelot,
     export_tables_to_csv,
     parse_document_text,
 )
@@ -51,175 +48,53 @@ async def get_task(task_id: int):
     except KeyError:
         return {"error": "Task not found"}
 
-# @router.post("/tabula_extract")
-# async def tabula_extract(file: UploadFile = File(...), pages: Optional[str] = Query("all")):
-#     task_id = task_store.create_task(
-#         task_type="tabula_extract",
-#         filename=file.filename,
-#         details={"pages": pages}
-#     )
-    
-#     try:
-#         task_store.update_task(task_id, status="processing")
-#         # Save uploaded file temporarily
-#         temp_path = f"temp_{file.filename}"
-#         with open(temp_path, "wb") as f:
-#             f.write(await file.read())
-            
-#         tables = extract_tables_from_pdf(temp_path, pages=pages if pages is not None else "all")
-        
-#         # Convert tables to JSON for API response
-#         tables_json = []
-#         for table in tables:
-#             if isinstance(table, pd.DataFrame):
-#                 tables_json.append(table.to_dict(orient="records"))
-#             else:
-#                 tables_json.append(table)
-                
-#         task_store.update_task(
-#             task_id, 
-#             status="completed",
-#             details={"table_count": len(tables_json)}
-#         )
-#         return {"tables": tables_json, "task_id": task_id}
-#     except Exception as e:
-#         task_store.update_task(task_id, status="error", details={"error": str(e)})
-#         raise
-#     finally:
-#         if os.path.exists(temp_path):
-#             os.remove(temp_path)
-
-# @router.post("/camelot_extract")
-# async def camelot_extract(file: UploadFile = File(...), pages: Optional[str] = Query("all")):
-#     task_id = task_store.create_task(
-#         task_type="camelot_extract",
-#         filename=file.filename,
-#         details={"pages": pages}
-#     )
-    
-#     temp_path = f"temp_{file.filename}"
-#     try:
-#         task_store.update_task(task_id, status="processing")
-#         with open(temp_path, "wb") as f:
-#             f.write(await file.read())
-            
-#         _, ext = os.path.splitext(temp_path)
-#         ext = ext.lower()
-        
-#         if ext == ".docx":
-#             tables = extract_tables_from_docx_with_camelot(temp_path)
-#         else:
-#             tables = extract_tables_from_pdf_with_camelot(temp_path, pages=pages if pages is not None else "all")
-            
-#         tables_json = [table.to_dict(orient="records") for table in tables]
-        
-#         task_store.update_task(
-#             task_id, 
-#             status="completed",
-#             details={"table_count": len(tables_json)}
-#         )
-#         return {"tables": tables_json, "task_id": task_id}
-#     except Exception as e:
-#         task_store.update_task(task_id, status="error", details={"error": str(e)})
-#         raise
-#     finally:
-#         if os.path.exists(temp_path):
-#             os.remove(temp_path)
-
-# @router.post("/export_csv")
-# async def export_csv(
-#     file: UploadFile = File(...), 
-#     method: str = Query("camelot"),
-#     base_filename: Optional[str] = Query("table"),
-#     pages: Optional[str] = Query("all")
-# ):
-#     task_id = task_store.create_task(
-#         task_type="export_csv",
-#         filename=file.filename,
-#         details={
-#             "method": method,
-#             "base_filename": base_filename,
-#             "pages": pages
-#         }
-#     )
-    
-#     temp_path = f"temp_{file.filename}"
-#     try:
-#         task_store.update_task(task_id, status="processing")
-#         with open(temp_path, "wb") as f:
-#             f.write(await file.read())
-            
-#         _, ext = os.path.splitext(temp_path)
-#         ext = ext.lower()
-        
-#         if ext == ".docx":
-#             tables = extract_tables_from_docx_with_camelot(temp_path)
-#         else:
-#             if method == "tabula":
-#                 tables = extract_tables_from_pdf(temp_path, pages=pages if pages is not None else "all")
-#             else:
-#                 tables = extract_tables_from_pdf_with_camelot(temp_path, pages=pages if pages is not None else "all")
-                
-#         safe_base_filename = base_filename if base_filename is not None else "table"
-#         export_tables_to_csv(tables, base_filename=safe_base_filename)
-        
-#         task_store.update_task(
-#             task_id, 
-#             status="completed",
-#             details={
-#                 "table_count": len(tables),
-#                 "output_base": safe_base_filename
-#             }
-#         )
-#         return {
-#             "message": f"Exported {len(tables)} tables to CSV with base filename '{safe_base_filename}'.",
-#             "task_id": task_id
-#         }
-#     except Exception as e:
-#         task_store.update_task(task_id, status="error", details={"error": str(e)})
-#         raise
-#     finally:
-#         if os.path.exists(temp_path):
-#             os.remove(temp_path)
-
 @router.post("/extract-resume-text")
-async def extract_resume_txt(request: Request, file: UploadFile = File(...), _: None = Depends(get_doctr_dependency)):
+async def extract_resume_txt(request: Request, file: UploadFile = File(...)):
     task_id = task_store.create_task(
         task_type="resume_extract",
         filename=file.filename
     )
     
-    # Get Doctr predictor from request.state (created by dependency)
-    ocr_model = getattr(request.state, "doctr_predictor", None)
-    
+    # We'll lazily create a Doctr predictor only if we need to OCR an image.
+    ocr_model = None
+    _temp_predictor = None
+        
     temp_path = None
     try:
         task_store.update_task(task_id, status="processing")
         print("File received. Waiting for extraction...")
-        
+            
         # Read uploaded file bytes once
         file_bytes = await file.read()
         ext = Path(file.filename or "").suffix.lower()
-
+    
         # Helper to save bytes to a temp file (used for docx / image fallbacks)
         def _save_temp(bts):
             p = f"temp_{file.filename}"
             with open(p, "wb") as tf:
                 tf.write(bts)
             return p
-
-        # 1) DOCX -> use parsing_service (assumed to handle docx)
+    
+            # 1) DOCX -> use parsing_service (assumed to handle docx)
         if ext == ".docx":
             temp_path = _save_temp(file_bytes)
             plain_text = parse_document_text(temp_path, ocr_model)
-
-        # 2) Images -> use parsing_service (DocTR or image OCR path)
+    
+            # 2) Images -> use parsing_service (DocTR or image OCR path)
         elif ext in (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"):
             print("Image file detected — using image OCR path (DocTR via parsing_service).")
+                # Lazily create predictor only for image path
+            try:
+                _temp_predictor = create_doctr_ocr()
+                ocr_model = _temp_predictor
+            except Exception as e:
+                    # If predictor creation fails, surface helpful error
+                raise RuntimeError(f"Failed to create DocTR predictor for image OCR: {e}")
+
             temp_path = _save_temp(file_bytes)
             plain_text = parse_document_text(temp_path, ocr_model)
-
-        # 3) PDF -> fast path with PyMuPDF, fallback to parsing_service if it fails
+    
+            # 3) PDF -> fast path with PyMuPDF, fallback to parsing_service if it fails
         else:
             try:
                 print("Trying PyMuPDF for PDF text extraction...")
@@ -233,7 +108,7 @@ async def extract_resume_txt(request: Request, file: UploadFile = File(...), _: 
                 print("PyMuPDF failed — falling back to parsing_service (DocTR) if available.")
                 temp_path = _save_temp(file_bytes)
                 plain_text = parse_document_text(temp_path, ocr_model)
-
+    
         task_store.update_task(
             task_id, 
             status="completed",
@@ -244,6 +119,12 @@ async def extract_resume_txt(request: Request, file: UploadFile = File(...), _: 
         task_store.update_task(task_id, status="error", details={"error": str(e)})
         raise
     finally:
+            # Dispose any predictor we created for image OCR
+        try:
+            if _temp_predictor is not None:
+                dispose_doctr_ocr(_temp_predictor)
+        except Exception:
+            pass
         if temp_path and Path(temp_path).exists():
             Path(temp_path).unlink()
 

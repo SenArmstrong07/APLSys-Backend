@@ -15,6 +15,7 @@ import time
 import base64
 from docx import Document as DocxDocument
 from utils.json_encoder import convert_numpy_types
+from utils.modal_ocr import detect_file_type
 from typing import Dict, Any, Union, List, Optional
 import asyncio
 import numpy as np
@@ -678,11 +679,12 @@ def _ocr_subprocess_worker(input_file: str, output_file: str, dpi: int = 200):
         detector = doctr_models.fast_small(pretrained=True)
         recognizer = doctr_models.crnn_mobilenet_v3_small(pretrained=True)
         
+        # Keep same assume_straight_pages behavior as create_doctr_ocr for consistency
         predictor = doctr_models.ocr_predictor(
             det_arch=detector,
             reco_arch=recognizer,
             pretrained=True,
-            assume_straight_pages=True,
+            assume_straight_pages=False,
         )
         predictor = predictor.to("cpu")
         
@@ -716,13 +718,54 @@ def _ocr_subprocess_worker(input_file: str, output_file: str, dpi: int = 200):
         # measure child peak after load / processing
         child_mem_after = psutil.Process().memory_info().rss / 1024 / 1024
         child_peak = max(child_mem_before, child_mem_after)
-        # write result and mem info
-        with open(output_file, 'w') as f:
-            json.dump({"result": exported, "mem_peak_mb": round(child_peak,1)}, f)
+        
+        # Ensure exported is JSON-serializable (convert numpy types)
+        # robust recursive sanitizer for JSON serialization
+        def _make_json_safe(o):
+            # primitives
+            if o is None or isinstance(o, (str, bool, int, float)):
+                return o
+            # numpy scalars/arrays
+            try:
+                import numpy as _np
+                if isinstance(o, _np.generic):
+                    return o.item()
+                if isinstance(o, _np.ndarray):
+                    return o.tolist()
+            except Exception:
+                pass
+            # dict/list/tuple/set
+            if isinstance(o, dict):
+                return {k: _make_json_safe(v) for k, v in o.items()}
+            if isinstance(o, (list, tuple, set)):
+                return [_make_json_safe(v) for v in o]
+            # objects exposing tolist()
+            if hasattr(o, "tolist") and callable(getattr(o, "tolist")):
+                try:
+                    return _make_json_safe(o.tolist())
+                except Exception:
+                    pass
+            # fallback to string
+            try:
+                return str(o)
+            except Exception:
+                return None
+
+        try:
+            # prefer project helper, then sanitize any remaining odd types
+            serializable_result = convert_numpy_types(exported)
+            serializable_result = _make_json_safe(serializable_result)
+        except Exception:
+            serializable_result = _make_json_safe(exported)
+ 
+         # write result and mem info
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump({"result": serializable_result, "mem_peak_mb": round(child_peak, 1)}, f, ensure_ascii=False)
         return 0
     except Exception as e:
-        with open(output_file, 'w') as f:
-            json.dump({"error": str(e)}, f)
+        # Write safe error payload (avoid any non-serializable objects)
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump({"error": str(e)}, f, ensure_ascii=False)
         return 1
 
 async def run_ocr_in_subprocess(content: bytes, filename: str) -> dict:
@@ -733,51 +776,98 @@ async def run_ocr_in_subprocess(content: bytes, filename: str) -> dict:
     import asyncio
     import json
     
+    
+    file_type = detect_file_type(content)
+    
+    # Decide file suffix
+    if file_type == "pdf":
+        suffix = ".pdf"
+    elif file_type:
+        suffix = f".{file_type}"
+        if suffix == ".jpeg":
+            suffix = ".jpg"
+    else:
+        # conservative fallback — OCR pipeline usually expects PDF or image
+        suffix = ".pdf"
+
     # Create temp files
-    with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.pdf') as inp:
+    with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix=suffix) as inp:
         inp.write(content)
         input_file = inp.name
-    
+
     output_file = tempfile.mktemp(suffix='.json')
-    
+
     try:
         # Build subprocess command—use repr() to escape paths properly on Windows
         cwd = os.getcwd()
         code = f"""
-import sys
+import sys, traceback
 sys.path.insert(0, {repr(cwd)})
 from services.ocr_service import _ocr_subprocess_worker
-exit(_ocr_subprocess_worker({repr(input_file)}, {repr(output_file)}))
+
+try:
+    rc = _ocr_subprocess_worker({repr(input_file)}, {repr(output_file)})
+    sys.exit(rc)
+except Exception:
+    traceback.print_exc()
+    sys.exit(1)
 """
-        
+
         # Run in subprocess
         proc = await asyncio.create_subprocess_exec(
             sys.executable, '-c', code,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
-        
+
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
-        
+
+        # If child failed, try to read the JSON it may have written for richer error info
         if proc.returncode != 0:
-            error_msg = stderr.decode('utf-8', errors='ignore')
-            raise RuntimeError(f"OCR subprocess failed: {error_msg}")
-        
-        # Read result
-        with open(output_file, 'r') as f:
-            result = json.load(f)
-        
-        if "error" in result:
+            # If output file exists attempt to load it
+            if os.path.exists(output_file):
+                try:
+                    with open(output_file, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    if isinstance(data, dict):
+                        if "error" in data:
+                            raise RuntimeError(f"OCR subprocess failed: {data.get('error')}")
+                        if "result" in data and isinstance(data.get("result"), dict):
+                            nested = data.get("result")
+                            if isinstance(nested, dict) and "error" in nested:
+                                raise RuntimeError(f"OCR subprocess failed: {nested.get('error')}")
+                except json.JSONDecodeError:
+                    # fall through to stderr
+                    pass
+                except Exception as e:
+                    err_txt = stderr.decode('utf-8', errors='ignore').strip()
+                    raise RuntimeError(f"OCR subprocess failed (while reading child JSON): {str(e)} | stderr: {err_txt or 'none'}")
+            # fallback to stderr/stdout content
+            err_txt = stderr.decode('utf-8', errors='ignore').strip()
+            out_txt = stdout.decode('utf-8', errors='ignore').strip()
+            combined = err_txt or out_txt or "unknown error"
+            raise RuntimeError(f"OCR subprocess failed: {combined}")
+
+        # Child succeeded — read its output JSON
+        if os.path.exists(output_file):
+            with open(output_file, 'r', encoding='utf-8') as f:
+                result = json.load(f)
+        else:
+            raise RuntimeError("OCR subprocess succeeded but output file is missing")
+
+        if isinstance(result, dict) and "error" in result:
             raise RuntimeError(result["error"])
-        
+
         return result
     finally:
         # Cleanup temp files
         try:
-            os.unlink(input_file)
+            if os.path.exists(input_file):
+                os.unlink(input_file)
         except Exception:
             pass
         try:
-            os.unlink(output_file)
+            if os.path.exists(output_file):
+                os.unlink(output_file)
         except Exception:
             pass

@@ -8,7 +8,7 @@ from services.ocr_service import (
     extract_context,
     ocr_space_ocr,
     pdf_to_images_bytes,
-    save_pdf_images,           
+    save_pdf_images,
     pdf_to_images_b64,
     get_processing_status,
     update_processing_status,
