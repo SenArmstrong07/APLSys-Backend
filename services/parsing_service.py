@@ -13,6 +13,7 @@ import json
 import os
 import sys
 import psutil
+from utils.json_encoder import convert_numpy_types
 
 # try to import python-docx; keep optional to avoid hard failure at import time
 try:
@@ -329,8 +330,21 @@ def _ner_subprocess_worker(input_file: str, output_file: str, model_id: str):
         mem_after = psutil.Process().memory_info().rss / 1024 / 1024
         mem_peak = max(mem_before, mem_after)
 
+        # Ensure result is JSON-serializable (convert numpy/torch types)
+        try:
+            serializable = convert_numpy_types(res)
+        except Exception:
+            # Best-effort: convert 'score' fields and fallback to stringifying unknowns
+            try:
+                for item in res:
+                    if isinstance(item, dict) and "score" in item:
+                        item["score"] = float(item["score"])
+                serializable = res
+            except Exception:
+                serializable = json.loads(json.dumps(res, default=str))
+
         with open(output_file, "w", encoding="utf-8") as out:
-            json.dump({"result": res, "mem_peak_mb": round(mem_peak, 1)}, out)
+            json.dump({"result": serializable, "mem_peak_mb": round(mem_peak, 1)}, out, ensure_ascii=False)
         return 0
     except Exception as e:
         with open(output_file, "w", encoding="utf-8") as out:
@@ -362,12 +376,38 @@ exit(_ner_subprocess_worker({repr(input_file)}, {repr(output_file)}, {repr(model
             stderr=asyncio.subprocess.PIPE
         )
         stdout, stderr = await proc.communicate()
+
+        # If child failed, prefer to read the structured JSON it may have written
         if proc.returncode != 0:
-            err = stderr.decode("utf-8", errors="ignore")
-            raise RuntimeError(f"NER subprocess failed: {err}")
-        # read output
-        with open(output_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
+            # try to read JSON first
+            if os.path.exists(output_file):
+                try:
+                    with open(output_file, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    if isinstance(data, dict):
+                        if "error" in data:
+                            raise RuntimeError(f"NER subprocess failed: {data.get('error')}")
+                        if "result" in data:
+                            # child produced a result despite non-zero exit; return it
+                            return data
+                except json.JSONDecodeError:
+                    # fall back to stderr below
+                    pass
+                except Exception as e:
+                    # if reading JSON raised, include stderr for context
+                    err_txt = stderr.decode("utf-8", errors="ignore").strip()
+                    raise RuntimeError(f"NER subprocess failed (reading child JSON): {e} | stderr: {err_txt or 'none'}")
+            # fallback to stderr/stdout content
+            err = stderr.decode("utf-8", errors="ignore").strip() or stdout.decode("utf-8", errors="ignore").strip()
+            raise RuntimeError(f"NER subprocess failed: {err or 'unknown error'}")
+
+        # Child succeeded — read its output JSON
+        if os.path.exists(output_file):
+            with open(output_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        else:
+            raise RuntimeError("NER subprocess succeeded but output file is missing")
+
         if "error" in data:
             raise RuntimeError(data["error"])
         return data
