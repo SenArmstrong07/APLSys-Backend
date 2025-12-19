@@ -490,13 +490,14 @@ async def _worker_process_region(content: bytes, filename: str, client_ip: str, 
         # Parse region results (filter words by region if provided)
         text_lines = []
         confidences = []
+        all_words = []  # <- new accumulator for words across pages/blocks/lines
+
         for page in result.get("pages", []):
             for block in page.get("blocks", []):
                 if not isinstance(block, dict):
                     continue
                 for line in block.get("lines", []):
                     words = line.get("words", []) or []
-
                     # preserve left-to-right order if geometry exists
                     def _word_x(w):
                         geom = w.get("geometry")
@@ -516,16 +517,21 @@ async def _worker_process_region(content: bytes, filename: str, client_ip: str, 
                                 filtered.append(w)
                         words = filtered
 
+                    # collect words for later averaging/processing
+                    for w in words:
+                        all_words.append(w)
+
                     line_text = " ".join([w.get("value", "") for w in words]).strip()
                     if line_text:
                         text_lines.append(line_text)
                     for w in words:
                         if "confidence" in w and w["confidence"] is not None:
                             confidences.append(w["confidence"])
+
+        # compute avg_conf using collected all_words (avoid using 'words' which may be undefined)
         total = 0.0
         weight = 0.0
-
-        for w in words:
+        for w in all_words:
             conf = w.get("confidence")
             if conf is not None:
                 length = max(len(w.get("value", "")), 1)
