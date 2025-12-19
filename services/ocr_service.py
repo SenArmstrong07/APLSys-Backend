@@ -15,7 +15,7 @@ import time
 import base64
 from docx import Document as DocxDocument
 from utils.json_encoder import convert_numpy_types
-from utils.modal_ocr import detect_file_type
+from utils.file_utils import detect_file_type
 from typing import Dict, Any, Union, List, Optional
 import asyncio
 import numpy as np
