@@ -1,6 +1,5 @@
 # app/routers/ocr_router.py
 from fastapi import APIRouter, UploadFile, File, Query, Request, HTTPException, Depends, Form
-from google.cloud import vision
 from services.ocr_service import (
     run_ocr,
     extract_on_document,
@@ -783,30 +782,33 @@ async def extract_text_region(
                 buf = _io.BytesIO()
                 crop.save(buf, format="PNG", optimize=True)
                 img_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-                
-                client = vision.ImageAnnotatorClient()
 
-                image = vision.Image(content=straight)
-
-                response = client.annotate_image({
-                    "image": image,
-                    "features": [{"type_": vision.Feature.Type.TEXT_DETECTION}],
-                })
-
-                texts = response.text_annotations
-                text = texts[0].description if texts else ""
-                
+                url = f"https://vision.googleapis.com/v1/images:annotate?key={vision_key}"
+                payload = {
+                    "requests": [
+                        {
+                            "image": {"content": img_b64},
+                            "features": [{"type": "TEXT_DETECTION", "maxResults": 1}]
+                        }
+                    ]
+                }
+                resp = requests.post(url, json=payload, timeout=30)
+                resp.raise_for_status()
+                data = resp.json()
+                resp0 = data.get("responses", [{}])[0]
+                text = (resp0.get("fullTextAnnotation", {}) or {}).get("text") or (resp0.get("textAnnotations", [{}])[0].get("description", "")) or ""
                 # try to compute a confidence if available in fullTextAnnotation pages/words
                 conf = 0.0
                 confidences = []
-                for page in response.full_text_annotation.pages:
-                    for block in page.blocks:
-                        for paragraph in block.paragraphs:
-                            for word in paragraph.words:
-                                if word.confidence is not None:
-                                    confidences.append(word.confidence)
+                for page in (resp0.get("fullTextAnnotation", {}) or {}).get("pages", []):
+                    for block in page.get("blocks", []):
+                        for paragraph in block.get("paragraphs", []):
+                            for word in paragraph.get("words", []):
+                                wc = word.get("confidence")
+                                if wc is not None:
+                                    confidences.append(wc)
                 if confidences:
-                    conf = round(sum(confidences) / len(confidences), 2) if confidences else 0.0
+                    conf = sum(confidences) / len(confidences)
 
                 task_store.update_task(task_id, status="completed", details={"text_length": len(text)})
                 return {"text": text or "", "confidence": round(conf, 2), "task_id": task_id}
@@ -821,11 +823,11 @@ async def extract_text_region(
         task_store.update_task(
             task_id,
             status="completed",
-            details={"text_length": len(text), "confidence": conf}
+            details={"text_length": len(result.get("text", "")), "confidence": result.get("confidence", 0.0)}
         )
         return {
-            "text": text,
-            "confidence": conf,
+            "text": result.get("text", ""),
+            "confidence": result.get("confidence", 0.0),
             "task_id": task_id
         }
     except Exception as e:
