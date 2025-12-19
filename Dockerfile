@@ -30,4 +30,4 @@ ENV PYTHONHASHSEED=random \
     PORT=8080
 
 # Start FastAPI app with Uvicorn
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT} --workers 1 --timeout-keep-alive 5 --lifespan off"]
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT} --workers 1 --timeout-keep-alive 5"]
