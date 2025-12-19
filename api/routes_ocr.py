@@ -642,13 +642,13 @@ async def extract_text_region(
         filename=file.filename
     )
 
+
     client_ip = get_client_ip(ocrreq)
     allowed, reason, retry_after = ocr_limiter.check_rate_limit(client_ip)
     if not allowed:
         task_store.update_task(task_id, status="error", details={"error": reason})
         raise HTTPException(status_code=429, detail=reason, headers={"Retry-After": str(retry_after)})
 
-    # file size guard
     size = getattr(file, "size", None)
     if size is not None:
         ok, msg = ocr_limiter.check_file_size(size)
@@ -661,129 +661,65 @@ async def extract_text_region(
         task_store.update_task(task_id, status="processing")
         content = await file.read()
 
-        # Read rotation and bbox from multipart form fields if present.
-        try:
-            # Prefer explicit Form params (handled by FastAPI). If not present, try parsing the raw form.
-            def _read_from_parsed_form():
-                nonlocal rotation, bbox_x, bbox_y, bbox_w, bbox_h
-                # already set by Form defaults if provided; nothing to change
-                return
+        # ---------- Load image ----------
+        import io
+        from PIL import Image
 
-            if bbox_x is None and bbox_y is None and bbox_w is None and bbox_h is None:
-                # fallback: parse raw multipart form (compatible with older callers)
-                form = await ocrreq.form()
-                rotation_value = form.get("rotation", rotation)
-                rotation = float(str(rotation_value)) if rotation_value else rotation
+        img = Image.open(io.BytesIO(content)).convert("RGB")
+        
+        
+        print("Incoming bbox px:", bbox_x, bbox_y, bbox_w, bbox_h)
+        print("Image size:", img.size)
 
-                def get_float(form, name: str) -> Optional[float]:
-                    v = form.get(name)
-                    if v is None:
-                        return None
-                    if isinstance(v, UploadFile):
-                        return None
-                    try:
-                        return float(v)
-                    except (TypeError, ValueError):
-                        return None
-
-                if bbox_x is None: bbox_x = get_float(form, "bbox_x")
-                if bbox_y is None: bbox_y = get_float(form, "bbox_y")
-                if bbox_w is None: bbox_w = get_float(form, "bbox_w")
-                if bbox_h is None: bbox_h = get_float(form, "bbox_h")
-
-            # clamp helper
-            def clamp01(x: float) -> float:
-                return max(0.0, min(1.0, x))
-
-            if None not in (bbox_x, bbox_y, bbox_w, bbox_h):
-                bx_raw = cast(float, bbox_x)
-                by_raw = cast(float, bbox_y)
-                bw_raw = cast(float, bbox_w)
-                bh_raw = cast(float, bbox_h)
-
-                # If UI sent pixel coordinates (values > 1), normalize using the
-                # rotated canvas dimensions that the frontend used (swap w/h for 90/270).
-                bx = bx_raw
-                by = by_raw
-                bw = bw_raw
-                bh = bh_raw
-                try:
-                    if max(bx_raw, by_raw, bw_raw, bh_raw) > 1.5:
-                        import io as _io
-                        from PIL import Image as PILImage
-                        img = PILImage.open(_io.BytesIO(content))
-                        img_w, img_h = img.size  # original (natural) image dims
-                        rot = int(round(rotation)) % 360
-                        if rot in (90, 270):
-                            rot_w, rot_h = img_h, img_w
-                        else:
-                            rot_w, rot_h = img_w, img_h
-                        if rot_w > 0 and rot_h > 0:
-                            bx = bx_raw / rot_w
-                            by = by_raw / rot_h
-                            bw = bw_raw / rot_w
-                            bh = bh_raw / rot_h
-                except Exception:
-                    # fallback: leave raw values (assume they were already normalized)
-                    bx = bx_raw
-                    by = by_raw
-                    bw = bw_raw
-                    bh = bh_raw
-
-                bbox = {
-                    "x": clamp01(bx),
-                    "y": clamp01(by),
-                    "width": clamp01(bw),
-                    "height": clamp01(bh),
-                }
-            else:
-                # NO bbox provided → treat upload as a client-side cropped image.
-                # Do not re-orient or remap bytes; run OCR on entire uploaded image.
-                bbox = None
-        except Exception:
-            rotation = rotation or 0.0
-            bbox = None
-
-        # Normalize rotation to canonical quarter-turn value (used only when remapping bbox)
+        # ---------- STRAIGHTEN BEFORE cropping ----------
         rotation = int(round(rotation)) % 360
-        if rotation not in (0, 90, 180, 270):
-            rotation = 0
+        if rotation in (90, 180, 270):
+            img = img.rotate(-rotation, expand=True)
 
-        # If bbox is None we assume the client already cropped/straightened the image.
-        # In that case do NOT call bbox_to_original and do not rotate the bytes on server.
-        if bbox is None:
-            bbox_orig = None
+        # ---------- Build bbox (ORIGINAL IMAGE PIXELS ONLY) ----------
+        bbox = None
+        if (
+            bbox_x is not None
+            and bbox_y is not None
+            and bbox_w is not None
+            and bbox_h is not None
+        ):
+            x = int(round(bbox_x))
+            y = int(round(bbox_y))
+            w = int(round(bbox_w))
+            h = int(round(bbox_h))
+
+            bbox = (x, y, x + w, y + h)
+            # Clamp bbox to image bounds (safety)
+            iw, ih = img.size
+            x1, y1, x2, y2 = bbox
+            x1 = max(0, min(x1, iw - 1))
+            y1 = max(0, min(y1, ih - 1))
+            x2 = max(x1 + 1, min(x2, iw))
+            y2 = max(y1 + 1, min(y2, ih))
+            bbox = (x1, y1, x2, y2)
+
+            img = img.crop(bbox)
+
+        # ---------- Rotate AFTER cropping (OCR-only) ----------
+        # rotation = int(round(rotation)) % 360
+        # if rotation in (90, 180, 270):
+        #     img = img.rotate(-rotation, expand=True)
+
+        # ---------- Google Vision path ----------
+        vision_key = getenv("CLOUD_VISION_API") or __import__("os").environ.get("CLOUD_VISION_API")
+        if not vision_key:
+            # Skip Google Vision if key not available (helps local dev & avoids crash)
+            print("CLOUD_VISION_API not configured; skipping Google Vision")
         else:
-            # Convert incoming bbox (which is in UI rotation-space) back to original-image normalized coords
-            bbox_orig = bbox_to_original(bbox, rotation)
-
-        # NEW: If image is rotated and a CLOUD_VISION secret is configured, prefer Google Vision
-        vision_key = getenv("CLOUD_VISION_API") or None
-        if rotation != 0 and vision_key:
             try:
-                # straighten image server-side, crop if bbox provided, then call Vision
-                import io as _io
-                from PIL import Image as PILImage
+                import base64
+                import requests
 
-                img = PILImage.open(_io.BytesIO(content)).convert("RGB")
-                straight = img.rotate(-rotation, expand=True) if rotation else img
-
-                # If bbox provided, assume bbox is normalized (0..1) in UI rotation-space.
-                if bbox is not None:
-                    w, h = straight.size
-                    sx = max(0, min(int(round(bbox["x"] * w)), w - 1))
-                    sy = max(0, min(int(round(bbox["y"] * h)), h - 1))
-                    sw = max(1, min(int(round(bbox["width"] * w)), w - sx))
-                    sh = max(1, min(int(round(bbox["height"] * h)), h - sy))
-                    crop = straight.crop((sx, sy, sx + sw, sy + sh))
-                else:
-                    crop = straight
-
-                buf = _io.BytesIO()
-                crop.save(buf, format="PNG", optimize=True)
+                buf = io.BytesIO()
+                img.save(buf, format="PNG", optimize=True)
                 img_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
 
-                url = f"https://vision.googleapis.com/v1/images:annotate?key={vision_key}"
                 payload = {
                     "requests": [
                         {
@@ -792,47 +728,77 @@ async def extract_text_region(
                         }
                     ]
                 }
-                resp = requests.post(url, json=payload, timeout=30)
+
+                resp = requests.post(
+                    f"https://vision.googleapis.com/v1/images:annotate?key={vision_key}",
+                    json=payload,
+                    timeout=30
+                )
                 resp.raise_for_status()
+
                 data = resp.json()
                 resp0 = data.get("responses", [{}])[0]
-                text = (resp0.get("fullTextAnnotation", {}) or {}).get("text") or (resp0.get("textAnnotations", [{}])[0].get("description", "")) or ""
-                # try to compute a confidence if available in fullTextAnnotation pages/words
-                conf = 0.0
+
+                text = (
+                    resp0.get("fullTextAnnotation", {}) or {}
+                ).get("text") or (
+                    resp0.get("textAnnotations", [{}])[0].get("description", "")
+                ) or ""
+
                 confidences = []
-                for page in (resp0.get("fullTextAnnotation", {}) or {}).get("pages", []):
+                for page in resp0.get("fullTextAnnotation", {}).get("pages", []):
                     for block in page.get("blocks", []):
-                        for paragraph in block.get("paragraphs", []):
-                            for word in paragraph.get("words", []):
-                                wc = word.get("confidence")
-                                if wc is not None:
-                                    confidences.append(wc)
-                if confidences:
-                    conf = sum(confidences) / len(confidences)
+                        for para in block.get("paragraphs", []):
+                            for word in para.get("words", []):
+                                if "confidence" in word:
+                                    confidences.append(word["confidence"])
+
+                conf = round(sum(confidences) / len(confidences), 2) if confidences else 0.0
 
                 task_store.update_task(task_id, status="completed", details={"text_length": len(text)})
-                return {"text": text or "", "confidence": round(conf, 2), "task_id": task_id}
+                return {"text": text, "confidence": conf, "task_id": task_id}
+
             except Exception as e:
-                # If Vision fails, fall back to existing DocTR worker path
-                print("Google Vision path failed, falling back to DocTR:", e)
+                print("Google Vision failed, falling back to DocTR:", e)
 
-        # Submit to queue; worker returns text + confidence (existing flow)
-        result = await ocr_queue.submit(_worker_process_region, content, file.filename or "uploaded", client_ip, bbox_orig)
+        # ---------- DocTR / worker path ----------
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
 
-        # Update task and return the extracted text with confidence
+        result = await ocr_queue.submit(
+            _worker_process_region,
+            buf.getvalue(),
+            file.filename or "uploaded",
+            client_ip,
+            None  # bbox already applied
+        )
+
+        for page in result.get("pages", []):
+            for block in page.get("blocks", []):
+                for line in block.get("lines", []):
+                    for word in line.get("words", []):
+                        print("WORD:", word.value, "GEOM:", word.geometry)
+        
+        print("Normalized bbox:", x1, y1, x2, y2)
+        print("DocTR pages:", result.get("pages", []))
+
+
         task_store.update_task(
             task_id,
             status="completed",
             details={"text_length": len(result.get("text", "")), "confidence": result.get("confidence", 0.0)}
         )
+
         return {
             "text": result.get("text", ""),
             "confidence": result.get("confidence", 0.0),
             "task_id": task_id
         }
+
     except Exception as e:
         task_store.update_task(task_id, status="error", details={"error": str(e)})
         raise
+
 
 @router.post("/search-results")
 async def search_results(
