@@ -624,8 +624,11 @@ async def extract_text_full(ocrreq: Request, file: UploadFile = File(...)):
         task_store.update_task(task_id, status="error", details={"error": str(e)})
         raise
     finally:
-        # no local temp files here (cleanup handled elsewhere)
-        pass
+        # ensure we always release the rate-limiter reservation for this client
+        try:
+            ocr_limiter.release_request(client_ip)
+        except Exception:
+            pass
 
 @router.post("/extract-region")
 async def extract_text_region(
