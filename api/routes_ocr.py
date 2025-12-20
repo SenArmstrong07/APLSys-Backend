@@ -319,6 +319,54 @@ def get_client_ip(request: Request) -> str:
     return request.headers.get("x-forwarded-for", "unknown").split(",")[0].strip()
 
 
+# --- Add helper: compute normalized bbox for words (attach as 'bbox' on each word) ---
+def _attach_normalized_bboxes(exported: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Mutate `exported` in-place: for each word with 'geometry' (list of points),
+    compute a normalized bbox {x,y,width,height} based on min/max of points.
+    Frontend can multiply these normalized values by image dimensions to render boxes.
+    """
+    if not isinstance(exported, dict):
+        return exported
+    pages = exported.get("pages", [])
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        for block in page.get("blocks", []) or []:
+            if not isinstance(block, dict):
+                continue
+            for line in block.get("lines", []) or []:
+                if not isinstance(line, dict):
+                    continue
+                for word in line.get("words", []) or []:
+                    geom = word.get("geometry")
+                    if not geom or not isinstance(geom, list):
+                        continue
+                    xs = []
+                    ys = []
+                    # geometry may be list of [x,y] or nested lists; flatten defensively
+                    for pt in geom:
+                        try:
+                            if isinstance(pt, (list, tuple)) and len(pt) >= 2:
+                                xs.append(float(pt[0]))
+                                ys.append(float(pt[1]))
+                        except Exception:
+                            continue
+                    if not xs or not ys:
+                        continue
+                    min_x = min(xs)
+                    min_y = min(ys)
+                    max_x = max(xs)
+                    max_y = max(ys)
+                    word['bbox'] = {
+                        "x": min_x,
+                        "y": min_y,
+                        "width": max_x - min_x,
+                        "height": max_y - min_y
+                    }
+    return exported
+
+
 @router.post("/batch-ocr")
 async def batch_ocr(request: Request, files: List[UploadFile] = File(...), _: None = Depends(get_doctr_dependency)):
     """Run OCR on multiple uploaded files with rate limiting and memory checks."""
@@ -613,6 +661,13 @@ async def extract_text_full(ocrreq: Request, file: UploadFile = File(...)):
 
         # Submit job to the OCR queue; worker creates/disposes predictor
         exported = await ocr_queue.submit(_worker_process_full, content, file.filename or "uploaded", client_ip)
+
+        # Attach normalized per-word bbox to exported result (frontend can map to pixels)
+        try:
+            exported = _attach_normalized_bboxes(exported)
+        except Exception:
+            # non-fatal: continue returning original exported if augmentation fails
+            pass
 
         task_store.update_task(
             task_id,
