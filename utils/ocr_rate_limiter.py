@@ -16,13 +16,14 @@ class OCRRateLimiter:
         max_requests_per_minute: int = 3,
         max_batch_files: int = 5,
         max_file_size_mb: int = 20,
-        memory_threshold_mb: int = 700  # LOWERED from 850 to 700
+        memory_threshold_mb: int = 2048,  # RAISED to 2GB
+        memory_critical_mb: int = 900
     ):
         self.max_requests_per_minute = max_requests_per_minute
         self.max_batch_files = max_batch_files
         self.max_file_size_mb = max_file_size_mb
         self.memory_threshold_mb = memory_threshold_mb
-        self.memory_critical_mb = 900  # If > 900MB, force cleanup before allowing requests
+        self.memory_critical_mb = memory_critical_mb  # now configurable
         
         self.request_times: Dict[str, list] = {}
         self.active_requests: Dict[str, int] = {}
@@ -122,5 +123,6 @@ ocr_limiter = OCRRateLimiter(
     max_requests_per_minute=3,
     max_batch_files=5,
     max_file_size_mb=20,
-    memory_threshold_mb=700  # Lower threshold triggers earlier cleanup
+    memory_threshold_mb=3400,   # recommend 3.4GB
+    memory_critical_mb=3000     # recommend 3.0GB (trigger cleanup)
 )
