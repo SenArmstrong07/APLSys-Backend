@@ -12,6 +12,7 @@ class PromptRequest(BaseModel):
     
 class ClassifyRequest(BaseModel):
     text: str
+    tags: Optional[List[str]] = None
     
 class ResumeTextRequest(BaseModel):
     text: str

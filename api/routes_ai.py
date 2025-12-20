@@ -1,4 +1,4 @@
-from fastapi import APIRouter, UploadFile, File, Form, Query, HTTPException, Request, status
+from fastapi import APIRouter, UploadFile, File, Form, Query, HTTPException, Request, status, Response
 from model.request_schema import ClassifyRequest, ResumeAnalysisRequest
 import requests
 from os import getenv
@@ -414,37 +414,90 @@ async def analyze_resume(req: ResumeAnalysisRequest, request: Request):
         
 
     
+# Default tag set (frontend DEFAULT_TAGS can override by sending tags in request)
+DEFAULT_TAGS = [
+  'name','full_name','first_name','last_name','middle_name',
+  'date_of_birth','gender','age','nationality',
+  'address','location','city','country','postal_code',
+  'phone','mobile_number','email',
+  'id_number','passport_number','license_number',
+  'skills','experience','years_of_experience',
+  'education','degree','field_of_study',
+  'certifications','organization','position','job_title',
+  'achievements','projects','languages','references',
+  'invoice_number','receipt_number','transaction_id',
+  'purchase_order','vendor_name','customer_name','company_name','business_name','tax_id',
+  'subtotal','total_amount','amount_due','amount_paid','discount','tax','vat_number','currency','payment_method','issue_date','due_date',
+  'account_number','bank_name','branch_code','iban','swift_code','balance','statement_period','policy_number','contract_number','signature','authorization','terms_and_conditions',
+  'date','time','document_type','reference_number','barcode','qrcode','website','url','notes','remarks','misc'
+]
+
+def reduce_tokens(text: str, max_chars: int = 2000) -> Optional[str]:
+    """
+    Best-effort reduce token payload by collapsing whitespace and keeping head+tail.
+    Returns reduced text or None if reduction still too large.
+    """
+    if not text:
+        return ""
+    cleaned = re.sub(r"\s+", " ", text).strip()
+    if len(cleaned) <= max_chars:
+        return cleaned
+    head_len = int(max_chars * 0.6)
+    tail_len = max_chars - head_len
+    candidate = cleaned[:head_len].rstrip() + " " + cleaned[-tail_len:].lstrip()
+    if len(candidate) <= max_chars:
+        return candidate
+    # final aggressive truncation
+    trunc = cleaned[:max_chars]
+    return trunc if len(trunc) <= max_chars else None
+
 @router.post("/classify")
 async def classify_text(req: ClassifyRequest):
+    """
+    Classify text into one of the provided tags (or DEFAULT_TAGS).
+    Attempts to reduce token size; if reduction fails or the external call fails, respond 204 No Content.
+    """
+    tags = req.tags if req.tags else DEFAULT_TAGS
+    try:
+        max_chars = int(getenv("CLASSIFY_MAX_CHARS", "2000"))
+    except Exception:
+        max_chars = 2000
+
+    reduced = reduce_tokens(req.text or "", max_chars=max_chars)
+    if reduced is None:
+        # couldn't reduce tokens to acceptable size -> return nothing
+        return Response(status_code=204)
+
     prompt = (
         "Classify the following text into one of these tags: "
-        "name, phone, email, education, address, skills, experience. "
-        "Return only the tag.\n"
-        f"Text: \"{req.text}\""
+        + ", ".join(tags)
+        + ". Return only the tag.\n"
+        f"Text: \"{reduced}\""
     )
+
     url = f"{BASE_URL}/models/{GEMINI_MODEL}:generateContent"
     headers = {
         "Content-Type": "application/json",
         "x-goog-api-key": GEMINI_API_KEY
     }
-    payload = {
-        "contents": [
-            {"parts": [{"text": prompt}]}
-        ]
-    }
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
 
-    response = requests.post(url, json=payload, headers=headers)
-    response.raise_for_status()
-    data = response.json()
-    tag = (
-        data.get("candidates", [{}])[0]
-            .get("content", {})
-            .get("parts", [{}])[0]
-            .get("text", "")
-            .strip()
-    )
-    return {"tag": tag}
-    
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        tag = (
+            data.get("candidates", [{}])[0]
+                .get("content", {})
+                .get("parts", [{}])[0]
+                .get("text", "")
+                .strip()
+        )
+        return {"tag": tag}
+    except Exception:
+        # External call failed -> return nothing per requirement
+        return Response(status_code=204)
+
 @router.post("/detect-table-layout")
 def detect_table_layout(image_path):
     image_b64 = image_to_base64(image_path)
