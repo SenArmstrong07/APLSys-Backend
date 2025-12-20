@@ -798,7 +798,12 @@ async def extract_text_region(
     except Exception as e:
         task_store.update_task(task_id, status="error", details={"error": str(e)})
         raise
-
+    finally:
+        # ensure we always release the rate-limiter reservation for this client
+        try:
+            ocr_limiter.release_request(client_ip)
+        except Exception:
+            pass
 
 @router.post("/search-results")
 async def search_results(

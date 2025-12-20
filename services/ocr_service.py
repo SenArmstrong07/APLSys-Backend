@@ -45,8 +45,8 @@ OCRPage = Dict[str, List[OCRBlock]]
 OCRResult = Dict[str, List[OCRPage]]
 
 # Add memory tracking constants
-MAX_MEMORY_MB = 1024  # Hard limit per request
-WARN_MEMORY_MB = 900  # Warning threshold
+MAX_MEMORY_MB = 4096  # Hard limit per request
+WARN_MEMORY_MB = 3276  # Warning threshold
 DOCTR_DPI = 200  # Reduced from 300 for memory savings
 
 # Adjust thresholds for Doctr loading
