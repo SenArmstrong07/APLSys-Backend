@@ -832,12 +832,29 @@ async def extract_text_region(
         )
 
         for page in result.get("pages", []):
-            for block in page.get("blocks", []):
-                for line in block.get("lines", []):
-                    for word in line.get("words", []):
-                        print("WORD:", word.value, "GEOM:", word.geometry)
-        
-        print("Normalized bbox:", x1, y1, x2, y2)
+            if not isinstance(page, dict):
+                continue
+            for block in page.get("blocks", []) or []:
+                if not isinstance(block, dict):
+                    continue
+                for line in block.get("lines", []) or []:
+                    if not isinstance(line, dict):
+                        continue
+                    for word in line.get("words", []) or []:
+                        if isinstance(word, dict):
+                            wval = word.get("value")
+                            geom = word.get("geometry")
+                        else:
+                            wval = None
+                            geom = None
+                        print(f"WORD: {wval!r} GEOM: {geom!r}")
+
+        # If client provided a bbox we may have applied it; otherwise the client already sent a cropped image.
+        if bbox is not None:
+            print("Applied bbox (pixels):", bbox)
+        else:
+            print("No bbox provided; image already cropped by client.")
+
         print("DocTR pages:", result.get("pages", []))
 
 
