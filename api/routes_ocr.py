@@ -765,14 +765,14 @@ async def extract_text_region(
         #     img = img.rotate(-rotation, expand=True)
 
         # ---------- Google Vision path ----------
-        vision_key = getenv("CLOUD_VISION_API") or __import__("os").environ.get("CLOUD_VISION_API")
-        if not vision_key:
-            # Skip Google Vision if key not available (helps local dev & avoids crash)
-            print("CLOUD_VISION_API not configured; skipping Google Vision")
-        else:
             try:
                 import base64
                 import requests
+                from google.auth import default as google_auth_default
+                from google.auth.transport.requests import AuthorizedSession
+
+                creds, _ = google_auth_default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+                authed = AuthorizedSession(creds)
 
                 buf = io.BytesIO()
                 img.save(buf, format="PNG", optimize=True)
@@ -787,16 +787,10 @@ async def extract_text_region(
                     ]
                 }
 
-                resp = requests.post(
-                    f"https://vision.googleapis.com/v1/images:annotate?key={vision_key}",
-                    json=payload,
-                    timeout=30
-                )
+                resp = authed.post("https://vision.googleapis.com/v1/images:annotate", json=payload, timeout=30)
                 resp.raise_for_status()
-
                 data = resp.json()
                 resp0 = data.get("responses", [{}])[0]
-
                 text = (
                     resp0.get("fullTextAnnotation", {}) or {}
                 ).get("text") or (
