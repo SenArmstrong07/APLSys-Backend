@@ -13,9 +13,18 @@ from services.ocr_service import create_doctr_ocr, dispose_doctr_ocr
 from services.parsing_service import run_ner_in_subprocess
 import asyncio
 import gc
+import requests
+import json
+from os import getenv
+from dotenv import load_dotenv
 
 router = APIRouter()
 task_store = TaskStore()
+load_dotenv()
+
+GEMINI_MODEL = "gemini-1.5-flash"
+BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+GEMINI_API_KEY = getenv("VITE_GEMINI_API_KEY")
 
 # Reuse the doctr dependency from routes_ocr
 async def get_doctr_dependency(request: Request):
@@ -128,10 +137,79 @@ async def extract_resume_txt(request: Request, file: UploadFile = File(...)):
         if temp_path and Path(temp_path).exists():
             Path(temp_path).unlink()
 
+async def extract_resume_sections_with_gemini(text: str) -> dict:
+    """
+    Use Gemini to extract education, and work experience sections from resume text.
+    Returns dict with sections or empty dict if extraction fails.
+    """
+    if not GEMINI_API_KEY:
+        return {}
+    
+    prompt = (
+        "Extract the following sections from this resume text. Return ONLY a JSON object with these exact keys:\n"
+        "- education: list of education entries (school, degree, field, dates)\n"
+        "- work_experience: list of work experiences (company, title, dates, description)\n\n"
+        "If a section is not found or empty, use an empty list for that key.\n"
+        "Return ONLY valid JSON, no markdown, no explanation.\n\n"
+        f"Resume Text:\n{text}\n\n"
+        "JSON:"
+    )
+    
+    url = f"{BASE_URL}/models/{GEMINI_MODEL}:generateContent"
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": GEMINI_API_KEY
+    }
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+    
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        
+        result_text = (
+            data.get("candidates", [{}])[0]
+                .get("content", {})
+                .get("parts", [{}])[0]
+                .get("text", "")
+        )
+        
+        if not result_text:
+            return {}
+        
+        # Try to extract JSON from response
+        start = result_text.find('{')
+        end = result_text.rfind('}') + 1
+        
+        if start == -1 or end == 0:
+            return {}
+        
+        parsed = json.loads(result_text[start:end])
+        
+        # Validate that we have meaningful data
+        education = parsed.get("education", [])
+        skills = parsed.get("skills", [])
+        work_experience = parsed.get("work_experience", [])
+        
+        # Only return if at least one section has content
+        if education or work_experience:
+            return {
+                "education": education,
+                "work_experience": work_experience,
+                "source": "gemini"
+            }
+        
+        return {}
+    
+    except Exception as e:
+        print(f"Gemini section extraction failed: {str(e)}")
+        return {}
+
 @router.post("/ner-extract-resume-profile")
 async def ner_extract_resume_profile(req: ResumeTextRequest, request: Request):
     """
     Use subprocess NER pipeline to avoid keeping large transformer models resident.
+    Also attempts to extract structured sections (education and work_experience) via Gemini.
     """
     if not req.text or len(req.text.strip()) < 20:
         return {"error": "Input text too short or invalid."}
@@ -174,6 +252,26 @@ async def ner_extract_resume_profile(req: ResumeTextRequest, request: Request):
 
         parsed_entities = group_entities(results)
 
+        # Attempt to extract structured sections via Gemini
+        gemini_sections = await extract_resume_sections_with_gemini(req.text)
+        
+        # Merge Gemini sections with NER entities if extraction succeeded
+        structured_output = {
+            "parsed_entities": parsed_entities,
+            "summary": {
+                "entity_count": len(parsed_entities),
+                "text_length": len(req.text)
+            }
+        }
+        
+        # Add Gemini sections only if they were successfully extracted
+        if gemini_sections:
+            structured_output["gemini_sections"] = {
+                "education": gemini_sections.get("education", []),
+                #"skills": gemini_sections.get("skills", []),
+                "work_experience": gemini_sections.get("work_experience", [])
+            }
+
         # Aggressively delete pipeline and collect
         try:
             from services.ocr_service import get_memory_usage
@@ -186,21 +284,18 @@ async def ner_extract_resume_profile(req: ResumeTextRequest, request: Request):
             status="completed",
             details={
                 "entity_types": list(parsed_entities.keys()),
+                "gemini_sections_present": bool(gemini_sections),
                 "mem_before_mb": round(mem_before,1) if mem_before else None,
                 "mem_peak_mb": round(mem_peak,1) if mem_peak else None,
                 "mem_after_mb": round(mem_after,1) if mem_after else None,
             }
         )
 
-        print("DEBUG RESULTS:", parsed_entities)
+        print("DEBUG RESULTS:", structured_output)
 
         return {
             "task_id": task_id,
-            "parsed_entities": parsed_entities,
-            "summary": {
-                "entity_count": len(parsed_entities),
-                "text_length": len(req.text)
-            }
+            **structured_output
         }
 
     except Exception as e:

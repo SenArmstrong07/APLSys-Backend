@@ -13,8 +13,35 @@ router = APIRouter()
 load_dotenv()
 
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
-GEMINI_API_KEY = getenv("GEMINI_API_KEY")
+GEMINI_API_KEY = getenv("VITE_GEMINI_API_KEY")
 
+
+@router.get("/test-gemini-key")
+async def test_gemini_key():
+    """Quick test of Gemini API key validity"""
+    if not GEMINI_API_KEY:
+        return {"error": "GEMINI_API_KEY not set"}
+    
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": GEMINI_API_KEY
+    }
+    payload = {"contents": [{"parts": [{"text": "test"}]}]}
+    
+    try:
+        response = requests.post(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent",
+            json=payload,
+            headers=headers,
+            timeout=10
+        )
+        return {
+            "status_code": response.status_code,
+            "status": "OK" if response.status_code == 200 else "FAILED",
+            "response": response.text[:500] if response.status_code != 200 else "Success"
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 #Check available models
 @router.get("/list-models")
