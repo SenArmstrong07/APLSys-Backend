@@ -32,3 +32,5 @@ Thumbs.db
 
 #others
 VISION_CREDS.json
+.env
+extra_env.txt
