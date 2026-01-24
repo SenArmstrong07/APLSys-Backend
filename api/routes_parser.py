@@ -139,7 +139,7 @@ async def extract_resume_txt(request: Request, file: UploadFile = File(...)):
 
 async def extract_resume_sections_with_gemini(text: str) -> dict:
     """
-    Use Gemini to extract education, and work experience sections from resume text.
+    Use Gemini to extract education and work experience sections from resume text.
     Returns dict with sections or empty dict if extraction fails.
     """
     if not GEMINI_API_KEY:
@@ -155,24 +155,15 @@ async def extract_resume_sections_with_gemini(text: str) -> dict:
         "JSON:"
     )
     
-    url = f"{BASE_URL}/models/{GEMINI_MODEL}:generateContent"
-    headers = {
-        "Content-Type": "application/json",
-        "x-goog-api-key": GEMINI_API_KEY
-    }
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
-    
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        
-        result_text = (
-            data.get("candidates", [{}])[0]
-                .get("content", {})
-                .get("parts", [{}])[0]
-                .get("text", "")
+        from google import genai
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt
         )
+        
+        result_text = getattr(response, "text", "")
         
         if not result_text:
             return {}
@@ -188,7 +179,6 @@ async def extract_resume_sections_with_gemini(text: str) -> dict:
         
         # Validate that we have meaningful data
         education = parsed.get("education", [])
-        skills = parsed.get("skills", [])
         work_experience = parsed.get("work_experience", [])
         
         # Only return if at least one section has content
