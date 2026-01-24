@@ -12,36 +12,30 @@ from utils.mem_bar import memory_bar
 router = APIRouter()
 load_dotenv()
 
-BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+BASE_URL = "https://generativelanguage.googleapis.com/v1"
 GEMINI_API_KEY = getenv("VITE_GEMINI_API_KEY")
 
 
 @router.get("/test-gemini-key")
 async def test_gemini_key():
-    """Quick test of Gemini API key validity"""
+    """Quick test of Gemini API key validity using google.genai"""
     if not GEMINI_API_KEY:
         return {"error": "GEMINI_API_KEY not set"}
-    
-    headers = {
-        "Content-Type": "application/json",
-        "x-goog-api-key": GEMINI_API_KEY
-    }
-    payload = {"contents": [{"parts": [{"text": "test"}]}]}
-    
+
     try:
-        response = requests.post(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent",
-            json=payload,
-            headers=headers,
-            timeout=10
+        from google import genai
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents="Say hello"
         )
+        # If we get here, the key is valid and the API responded
         return {
-            "status_code": response.status_code,
-            "status": "OK" if response.status_code == 200 else "FAILED",
-            "response": response.text[:500] if response.status_code != 200 else "Success"
+            "status": "OK",
+            "response": getattr(response, "text", str(response))[:500]
         }
     except Exception as e:
-        return {"error": str(e)}
+        return {"status": "FAILED", "error": str(e)}
 
 #Check available models
 @router.get("/list-models")

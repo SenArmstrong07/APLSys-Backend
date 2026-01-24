@@ -1,5 +1,6 @@
 from fastapi import APIRouter, UploadFile, File, Form, Query, HTTPException, Request, status, Response
 from model.request_schema import ClassifyRequest, ResumeAnalysisRequest
+from google import genai
 import requests
 from os import getenv
 import time
@@ -28,7 +29,7 @@ load_dotenv()
 
 GEMINI_MODEL = "gemini-2.5-flash"
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
-GEMINI_API_KEY = getenv("GEMINI_API_KEY")
+GEMINI_API_KEY = getenv("VITE_GEMINI_API_KEY")
 
 GEMINI_RATE_LIMIT_LOCK = threading.Lock()
 GEMINI_LAST_CALL_TIME = 0.0
@@ -355,7 +356,7 @@ async def batch_analyze_resumes(
 @router.post("/analyze-resume")
 async def analyze_resume(req: ResumeAnalysisRequest, request: Request):
     """
-    Analyze resume using OpenRouter / DeepSeek chat completions.
+    Analyze resume using Gemini 2.5 with retries and exponential backoff.
     """
     client_ip = getattr(request.client, "host", "unknown")
     allowed, retry_after = check_rate_limit(client_ip)
@@ -365,6 +366,7 @@ async def analyze_resume(req: ResumeAnalysisRequest, request: Request):
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=f"Rate limit exceeded. Try again in {retry}s.",
             headers={"Retry-After": str(retry)})
+
     task_id = task_store.create_task(
         task_type="resume_analysis",
         details={
@@ -375,42 +377,53 @@ async def analyze_resume(req: ResumeAnalysisRequest, request: Request):
         }
     )
 
-    if not OPENROUTER_API_KEY:
-        task_store.update_task(task_id, status="error", details={"error": "OPENROUTER_API_KEY not set"})
-        return {"error": "OPENROUTER_API_KEY not set in environment"}
+    if not GEMINI_API_KEY:
+        task_store.update_task(task_id, status="error", details={"error": "GEMINI_API_KEY not set"})
+        return {"error": "GEMINI_API_KEY not set in environment"}
 
     prompt = build_prompt(req)
-    extra_headers = {
-        "HTTP-Referer": getenv("OPENROUTER_REFERER", "http://localhost:3000"),
-        "X-Title": getenv("OPENROUTER_TITLE", "Resume Analyzer"),
-    }
+    client = genai.Client(api_key=GEMINI_API_KEY)
 
     try:
         task_store.update_task(task_id, status="processing")
-        completion = client.chat.completions.create(
-            extra_headers=extra_headers,
-            extra_body={},
-            model=OPENROUTER_MODEL,
-            messages=[
-                {"role": "system", "content": "You are an expert resume analyzer."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.0,
-            max_tokens=800,
-        )
-        text = completion.choices[0].message.content
-        # sanitize model artifacts before logging/returning
-        text = clean_model_artifacts(text or "")
-        task_store.update_task(
-            task_id, 
-            status="completed",
-            details={"response_length": len(text) if text else 0}
-        )
-        print("DEBUG RESULT:", text)
-        return {"result": text, "task_id": task_id}
+
+        # Retry logic with exponential backoff
+        max_attempts = 3
+        base_delay = 1.0
+        for attempt in range(1, max_attempts + 1):
+            try:
+                # Use the new genai client call
+                response = client.models.generate_content(
+                    model=GEMINI_MODEL,
+                    contents=prompt
+                )
+                text = response.text if hasattr(response, "text") else str(response)
+                if not text:
+                    raise ValueError("Empty response from Gemini")
+
+                # Sanitize model artifacts before logging/returning
+                text = clean_model_artifacts(text)
+
+                task_store.update_task(
+                    task_id,
+                    status="completed",
+                    details={"response_length": len(text), "attempt": attempt}
+                )
+                print("DEBUG RESULT:", text)
+                return {"result": text, "task_id": task_id}
+
+            except Exception as e:
+                if attempt < max_attempts:
+                    delay = base_delay * (2 ** (attempt - 1))
+                    jitter = random.uniform(0, delay * 0.5)
+                    await asyncio.sleep(delay + jitter)
+                    continue
+                task_store.update_task(task_id, status="error", details={"error": str(e)})
+                return {"error": f"Gemini request failed: {str(e)}"}
+
     except Exception as e:
         task_store.update_task(task_id, status="error", details={"error": str(e)})
-        return {"error": f"OpenRouter request failed: {str(e)}", "headers_sent": extra_headers}
+        return {"error": f"Gemini request failed: {str(e)}"}
         
 
     
