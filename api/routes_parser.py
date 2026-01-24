@@ -23,7 +23,7 @@ task_store = TaskStore()
 load_dotenv()
 
 GEMINI_MODEL = "gemini-1.5-flash"
-BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+BASE_URL = "https://generativelanguage.googleapis.com/v1"
 GEMINI_API_KEY = getenv("VITE_GEMINI_API_KEY")
 
 # Reuse the doctr dependency from routes_ocr
