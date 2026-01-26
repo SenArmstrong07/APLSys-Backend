@@ -87,8 +87,14 @@ async def extract_resume_txt(request: Request, file: UploadFile = File(...)):
             # 1) DOCX -> use parsing_service (assumed to handle docx)
         if ext == ".docx":
             temp_path = _save_temp(file_bytes)
-            plain_text = parse_document_text(temp_path, ocr_model)
-    
+            try:
+                plain_text = parse_document_text(temp_path, ocr_model)
+                if not plain_text or not plain_text.strip():
+                    raise ValueError("DOCX extraction returned empty text")
+            except Exception as e:
+                print(f"DOCX extraction failed: {e}")
+                raise RuntimeError(f"Failed to extract text from DOCX: {e}")
+
             # 2) Images -> use parsing_service (DocTR or image OCR path)
         elif ext in (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"):
             print("Image file detected — using image OCR path (DocTR via parsing_service).")

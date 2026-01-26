@@ -158,9 +158,22 @@ def parse_document_text(path: str, ocr_model) -> str:
     if ext == ".docx":
         if DocxDocument is None:
             raise RuntimeError("python-docx not installed; cannot extract .docx text")
-        doc = DocxDocument(path)
-        paragraphs = [p.text for p in doc.paragraphs if p.text and p.text.strip()]
-        return _clean_text("\n".join(paragraphs))
+        try:
+            doc = DocxDocument(path)
+            paragraphs = [p.text for p in doc.paragraphs if p.text and p.text.strip()]
+            if not paragraphs:
+                # Try to extract from tables as fallback
+                for table in doc.tables:
+                    for row in table.rows:
+                        for cell in row.cells:
+                            if cell.text.strip():
+                                paragraphs.append(cell.text)
+            result = _clean_text("\n".join(paragraphs))
+            if not result:
+                raise ValueError("No text content found in DOCX document")
+            return result
+        except Exception as e:
+            raise RuntimeError(f"DOCX parsing error: {e}")
 
     # Images (common raster image extensions)
     if ext in (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"):
