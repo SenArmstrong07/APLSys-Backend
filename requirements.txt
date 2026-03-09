@@ -1,6 +1,5 @@
---index-url https://download.pytorch.org/whl/cpu
-torch
---index-url https://pypi.org/simple
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.2.2+cpu
 python-doctr
 fastapi
 google-genai
