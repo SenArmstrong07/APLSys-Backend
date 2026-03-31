@@ -30,7 +30,7 @@ import tempfile
 load_dotenv()
 
 
-GEMINI_MODEL = "gemini-2.5-pro"
+GEMINI_MODEL = "gemini-2.5-flash"
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
@@ -871,3 +871,93 @@ except Exception:
                 os.unlink(output_file)
         except Exception:
             pass
+
+def _heuristic_classify(text: str, filename: str | None = None, file_type: str | None = None) -> dict:
+    """
+    Lightweight heuristic classifier based on keyword matching and filename hints.
+    Returns {'type': str, 'confidence': float, 'source': 'heuristic', 'reasons': [...]}
+    """
+    text_l = (text or "").lower()
+    fname = (filename or "").lower()
+    candidates = {
+        "invoice": ["invoice", "invoice number", "amount due", "due date", "subtotal", "tax"],
+        "receipt": ["receipt", "total paid", "amount paid", "merchant", "transaction"],
+        "resume": ["experience", "education", "skills", "curriculum vitae", "resume"],
+        "contract": ["agreement", "party", "term", "witness", "hereby"],
+        "bank_statement": ["account", "statement", "balance", "transaction", "bank"],
+        "passport": ["passport", "passport no", "nationality", "passport number"],
+        "id_card": ["id card", "driver license", "dl number", "identification"],
+        "letter": ["dear ", "sincerely", "regards", "to whom it may concern"],
+        "bill": ["bill to", "invoice", "amount due", "due date"],
+    }
+
+    scores = {k: 0 for k in candidates.keys()}
+    reasons = []
+    for k, kws in candidates.items():
+        hits = sum(1 for kw in kws if kw in text_l)
+        if hits:
+            scores[k] += hits
+            reasons.append(f"{k}: {hits} keyword hits")
+
+    # filename hints boost
+    for k in candidates.keys():
+        if k in fname:
+            scores[k] += 2
+            reasons.append(f"{k}: filename hint")
+
+    # choose best
+    best = max(scores.items(), key=lambda x: x[1])
+    if best[1] == 0:
+        return {"type": "other", "confidence": 0.25, "source": "heuristic", "reasons": reasons}
+
+    # simple confidence mapping
+    confidence = min(0.95, 0.3 + 0.2 * best[1])
+    return {"type": best[0], "confidence": round(confidence, 2), "source": "heuristic", "reasons": reasons}
+
+
+def classify_document_type(content: bytes, filename: str | None = None) -> dict:
+    """
+    Classify document type for uploaded content.
+    Primary: ask Gemini with extracted text sample.
+    Fallback: heuristic classifier based on text / filename / file type.
+    Returns: {'type', 'confidence', 'source', ...}
+    """
+    try:
+        # Try to extract text using existing extractor
+        doc, exported = extract_on_document(content, None)
+        pages = exported.get("pages", []) if isinstance(exported, dict) else []
+        text = " ".join((p.get("text", "") for p in pages if isinstance(p, dict))) or ""
+    except Exception:
+        text = ""
+
+    # If no extracted text, try OCR-space quick fallback (works for images)
+    if not text.strip():
+        try:
+            oscr = ocr_space_ocr(content)
+            pages = oscr.get("pages", [])
+            text = " ".join(" ".join(w.get("value","") for line in (pg.get("blocks",[]) or []) for l in (line.get("lines",[]) or []) for w in (l.get("words",[]) or [])) for pg in pages)
+        except Exception:
+            pass
+
+    # Ask Gemini first (if we have text)
+    if text.strip():
+        gemini_res = {}
+        try:
+            gemini_res = __import__("services.ai_service", fromlist=["gemini_classify_document"]).gemini_classify_document(text)
+        except Exception as e:
+            gemini_res = {"error": str(e)}
+
+        if isinstance(gemini_res, dict) and "error" not in gemini_res and "type" in gemini_res:
+            # Ensure minimal shape
+            return {
+                "type": gemini_res.get("type"),
+                "confidence": float(gemini_res.get("confidence", 0.0)) if gemini_res.get("confidence") is not None else None,
+                "labels": gemini_res.get("labels"),
+                "source": "gemini",
+                "raw": gemini_res
+            }
+
+    # Fallback to heuristic
+    file_type = detect_file_type(content) if content else None
+    heuristic = _heuristic_classify(text, filename=filename, file_type=file_type)
+    return heuristic

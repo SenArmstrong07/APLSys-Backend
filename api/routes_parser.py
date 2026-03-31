@@ -1,4 +1,4 @@
-from fastapi import APIRouter, UploadFile, File, Query, Request, Depends
+from fastapi import APIRouter, UploadFile, File, Query, Request, HTTPException
 from pathlib import Path
 from doctr.io import DocumentFile
 import fitz
@@ -17,6 +17,8 @@ import requests
 import json
 from os import getenv
 from dotenv import load_dotenv
+import tempfile
+from urllib.parse import quote_plus
 
 router = APIRouter()
 task_store = TaskStore()
@@ -24,7 +26,14 @@ load_dotenv()
 
 GEMINI_MODEL = "gemini-2.5-flash"
 BASE_URL = "https://generativelanguage.googleapis.com/v1"
-GEMINI_API_KEY = getenv("VITE_GEMINI_API_KEY")
+GEMINI_API_KEY = getenv("GEMINI_API_KEY")
+RESUME_PARSER_API_KEY = getenv("RESUME_PARSER_API_KEY")
+
+CVPARSER_PARSE_URL = "https://cvparserpro.com/api/v1/parse"
+CVPARSER_CANDIDATE_URL = "https://cvparserpro.com/api/v1/candidates/{}"
+
+POLL_INTERVAL = 2          # seconds
+POLL_TIMEOUT = 300         # seconds (total)
 
 # Reuse the doctr dependency from routes_ocr
 async def get_doctr_dependency(request: Request):
@@ -297,3 +306,105 @@ async def ner_extract_resume_profile(req: ResumeTextRequest, request: Request):
     except Exception as e:
         task_store.update_task(task_id, status="error", details={"error": str(e)})
         raise
+
+def has_non_null_values(obj: dict) -> bool:
+    """Check if a dictionary has at least one non-null/non-empty value."""
+    return any(v not in (None, "", [], {}) for v in obj.values())
+
+@router.post("/thirdparty-res-parser")
+async def thirdparty_res_parser(
+    file: UploadFile = File(...),
+    wait: bool = Query(False, description="Wait for parsing to complete")
+):
+    if not RESUME_PARSER_API_KEY:
+        raise HTTPException(status_code=500, detail="RESUME_PARSER_API_KEY not set")
+
+    # ---- Upload resume ----
+    content = await file.read()
+    headers = {"X-API-Key": RESUME_PARSER_API_KEY}
+    files = {
+        "files": (
+            file.filename,
+            content,
+            file.content_type or "application/octet-stream"
+        )
+    }
+
+    try:
+        resp = await asyncio.to_thread(
+            requests.post,
+            CVPARSER_PARSE_URL,
+            headers=headers,
+            files=files,
+            timeout=60
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Failed to upload resume: {e}")
+
+    # ---- Extract candidate ID ----
+    candidate_id = (
+        data.get("candidate_id")
+        or data.get("id")
+        or (data.get("candidates", [{}])[0].get("id"))
+    )
+
+    if not candidate_id:
+        return {"status": "processing", "message": "Candidate created but ID not returned"}
+
+    # ---- Return immediately if wait=False ----
+    if not wait:
+        return {"status": "processing", "candidate_id": candidate_id}
+
+    # ---- Poll until resume is meaningful or timeout ----
+    poll_url = CVPARSER_CANDIDATE_URL.format(candidate_id)
+    elapsed = 0
+
+    while elapsed < POLL_TIMEOUT:
+        try:
+            poll_resp = await asyncio.to_thread(
+                requests.get,
+                poll_url,
+                headers=headers,
+                timeout=15
+            )
+            poll_resp.raise_for_status()
+            candidate = poll_resp.json()
+        except requests.RequestException:
+            # Connection issue or server reset, retry after interval
+            await asyncio.sleep(POLL_INTERVAL)
+            elapsed += POLL_INTERVAL
+            continue
+
+        # Check parsing_status and resume
+        parsing_status = candidate.get("data", {}).get("parsing_status") \
+                         or candidate.get("parsing_status") \
+                         or candidate.get("status")
+
+        resume = candidate.get("data", {}).get("resume")
+        if resume and isinstance(resume, dict) and has_non_null_values(resume):
+            return {
+                "status": "completed",
+                "candidate_id": candidate_id,
+                "resume": resume
+            }
+
+        if parsing_status and str(parsing_status).lower() == "completed":
+            # Parsing complete but resume may be empty; return raw candidate
+            return {
+                "status": "completed",
+                "candidate_id": candidate_id,
+                "resume": resume or {},
+                "message": "Parsing completed, resume may be empty"
+            }
+
+        await asyncio.sleep(POLL_INTERVAL)
+        elapsed += POLL_INTERVAL
+
+    # ---- Timeout fallback ----
+    return {
+        "status": "processing",
+        "candidate_id": candidate_id,
+        "message": "Parsing still in progress after timeout"
+    }

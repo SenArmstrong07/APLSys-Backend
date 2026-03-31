@@ -29,7 +29,7 @@ load_dotenv()
 
 GEMINI_MODEL = "gemini-2.5-flash"
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
-GEMINI_API_KEY = getenv("VITE_GEMINI_API_KEY")
+GEMINI_API_KEY = getenv("GEMINI_API_KEY")
 
 GEMINI_RATE_LIMIT_LOCK = threading.Lock()
 GEMINI_LAST_CALL_TIME = 0.0

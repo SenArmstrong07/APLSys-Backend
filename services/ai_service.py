@@ -214,4 +214,53 @@ def deepseek_extract_metadata_from_text(extracted_text: str) -> dict:
     except Exception:
         return {"error": "Failed to parse OpenRouter response", "raw": cleaned[:1500]}
 
+def gemini_classify_document(text: str, attempts: int = 3, base_delay: float = 1.0) -> dict:
+    """
+    Ask Gemini to classify document type. Returns a dict (expected keys: 'type', 'confidence', ...).
+    On failure returns {'error': ...}
+    """
+    if not text or not GEMINI_API_KEY:
+        return {"error": "No text or GEMINI_API_KEY not set"}
+
+    url = f"{BASE_URL}/models/{GEMINI_MODEL}:generateContent"
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": GEMINI_API_KEY
+    }
+
+    prompt = (
+        "Classify the type of the following document. "
+        "Return EXACTLY one JSON object and NOTHING ELSE with keys: "
+        "\"type\" (one of: invoice, receipt, resume, contract, bank_statement, passport, id_card, letter, bill, other), "
+        "\"confidence\" (0.0-1.0), and optional \"labels\" (list).\n\n"
+        f"Document Text:\n{text[:4000]}\n\nJSON:"
+    )
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+
+    last_exc = None
+    for attempt in range(attempts):
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=30)
+            if resp.status_code == 503:
+                time.sleep(base_delay * (2 ** attempt))
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            text_resp = (
+                data.get("candidates", [{}])[0]
+                    .get("content", {})
+                    .get("parts", [{}])[0]
+                    .get("text", "")
+            )
+            start = text_resp.find("{")
+            end = text_resp.rfind("}") + 1
+            if start == -1 or end == 0:
+                return {"error": "No JSON returned from Gemini", "raw": text_resp[:1000]}
+            parsed = json.loads(text_resp[start:end])
+            return parsed
+        except Exception as e:
+            last_exc = e
+            time.sleep(base_delay * (2 ** attempt))
+    return {"error": f"gemini_failed: {str(last_exc)}"}
+
 

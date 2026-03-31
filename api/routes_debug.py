@@ -13,7 +13,7 @@ router = APIRouter()
 load_dotenv()
 
 BASE_URL = "https://generativelanguage.googleapis.com/v1"
-GEMINI_API_KEY = getenv("VITE_GEMINI_API_KEY")
+GEMINI_API_KEY = getenv("GEMINI_API_KEY")
 
 
 @router.get("/test-gemini-key")
