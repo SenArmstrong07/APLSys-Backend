@@ -18,7 +18,8 @@ from services.ocr_service import (
     _aggressive_model_unload,
     bbox_to_original,
     intersects,
-    run_ocr_in_subprocess
+    run_ocr_in_subprocess,
+    classify_document_type
 )
 from utils.task_store import TaskStore
 from utils.ocr_rate_limiter import ocr_limiter
@@ -415,10 +416,39 @@ async def batch_ocr(request: Request, files: List[UploadFile] = File(...), _: No
                 task_store.update_task(file_task_id, status="processing")
                 content = await file.read()
                 
-                # Use Doctr predictor via extract_on_document
+                # Try quick OCR via ocr.space first; if it yields text, use it and skip DocTR.
+                try:
+                    oscr = ocr_space_ocr(content)
+                    pages = oscr.get("pages", []) or []
+                    ocr_lines = []
+                    for page in pages:
+                        for block in page.get("blocks", []) or []:
+                            for line in block.get("lines", []) or []:
+                                words = line.get("words", []) or []
+                                line_text = " ".join([w.get("value", "") for w in words if isinstance(w, dict)]).strip()
+                                if line_text:
+                                    ocr_lines.append(line_text)
+                    if ocr_lines:
+                        extracted_text = "\n".join(ocr_lines)
+                        task_store.update_task(
+                            file_task_id,
+                            status="completed",
+                            progress=1.0,
+                            details={"text_snippet": extracted_text[:300], "source": "ocr_space"}
+                        )
+                        update_processing_status(file.filename, "completed")
+                        results.append({"filename": file.filename, "text": extracted_text.strip(), "source": "ocr_space"})
+                        # Skip DocTR processing and continue with next file
+                        continue
+                except Exception as e:
+                    # Log and fall back to DocTR path below
+                    print(f"ocr.space failed for {file.filename}: {e}")
+
+                # Use Doctr predictor via extract_on_document (fallback)
                 doc, exported = extract_on_document(content, predictor)
                 
                 # If doc is a PIL Image, run Doctr predictor on it
+                temp_path = None
                 if isinstance(doc, Image.Image):
                     import importlib
                     doctr_io = importlib.import_module("doctr.io")
@@ -925,3 +955,20 @@ async def search_results(
             continue
     
     return {"matches": matches}
+
+@router.post("/classify-document")
+async def classify_document(request: Request, file: UploadFile = File(...)):
+    """
+    Classify the document type using Gemini with a local heuristic fallback.
+    Returns: { task_id, type, confidence, source, ... }
+    """
+    task_id = task_store.create_task(task_type="classify_document", filename=file.filename)
+    task_store.update_task(task_id, status="processing")
+    try:
+        content = await file.read()
+        result = classify_document_type(content, filename=file.filename or "uploaded")
+        task_store.update_task(task_id, status="completed", details={"doc_type": result.get("type")})
+        return {"task_id": task_id, **result}
+    except Exception as e:
+        task_store.update_task(task_id, status="error", details={"error": str(e)})
+        raise HTTPException(status_code=500, detail=str(e))
