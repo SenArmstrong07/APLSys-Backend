@@ -110,6 +110,6 @@ app.include_router(routes_parser.router, prefix="/parser", tags=["PARSER"])
 def root():
     return {"message": "Backend is running"}
 
-# if __name__ == "__main__":
+# if __name__ == "__main__": # Use uvicorn command to run instead of running this file directly
 #     port = int(os.environ.get("PORT", 8080))
 #     uv.run("main:app", host="0.0.0.0", port=port, workers=1, timeout_keep_alive=5 ,reload=True)
