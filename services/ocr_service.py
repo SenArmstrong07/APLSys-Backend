@@ -43,36 +43,25 @@ GEMINI_MODEL = "gemini-2.5-flash"
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Google Cloud Vision Configuration
-VISION_CREDS_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "VISION_CREDS.json")
 VISION_CLIENT: Optional[ImageAnnotatorClient] = None
 
 def get_vision_client() -> ImageAnnotatorClient:
     """
     Initialize and return Google Cloud Vision API client.
-    Uses service account credentials from VISION_CREDS.json.
+    Uses service account credentials from the ADC.
     Client is cached globally to avoid repeated initialization.
     """
     global VISION_CLIENT
-    
+
     if VISION_CLIENT is not None:
         return VISION_CLIENT
-    
-    if not GOOGLE_CLOUD_VISION_AVAILABLE:
-        raise ImportError("google-cloud-vision is not installed. Install with: pip install google-cloud-vision")
-    
+
     try:
-        # Check if credentials file exists
-        if not os.path.exists(VISION_CREDS_PATH):
-            raise FileNotFoundError(
-                f"Google Cloud credentials file not found at: {VISION_CREDS_PATH}\n"
-                f"Please ensure VISION_CREDS.json exists in the project root or set GOOGLE_APPLICATION_CREDENTIALS environment variable."
-            )
-        
-        # Initialize client with service account credentials
+        # Use ADC (no JSON file)
         VISION_CLIENT = vision.ImageAnnotatorClient()
-        print(f"Google Cloud Vision API client initialized successfully using credentials from: {VISION_CREDS_PATH}")
+        print("Google Cloud Vision client initialized using ADC")
         return VISION_CLIENT
+
     except Exception as e:
         raise RuntimeError(f"Failed to initialize Google Cloud Vision client: {str(e)}")
 
