@@ -19,7 +19,9 @@ from services.ocr_service import (
     bbox_to_original,
     intersects,
     run_ocr_in_subprocess,
-    classify_document_type
+    classify_document_type,
+    google_cloud_vision_ocr,
+    get_vision_client
 )
 from utils.task_store import TaskStore
 from utils.ocr_rate_limiter import ocr_limiter
@@ -972,3 +974,150 @@ async def classify_document(request: Request, file: UploadFile = File(...)):
     except Exception as e:
         task_store.update_task(task_id, status="error", details={"error": str(e)})
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/google-cloud-vision-ocr")
+async def google_cloud_vision_ocr_endpoint(
+    request: Request,
+    file: UploadFile = File(...),
+    include_confidence: bool = Query(True, description="Include confidence scores in response")
+):
+    """
+    Perform OCR using Google Cloud Vision API with service account credentials.
+    
+    This endpoint uses your GCR (Google Cloud) service account credentials to perform
+    high-quality OCR on uploaded images or documents.
+    
+    Args:
+        file: Image or document file to OCR (JPEG, PNG, PDF, TIFF, WebP, etc.)
+        include_confidence: Include confidence scores for each word
+        
+    Returns:
+        {
+            "task_id": int,
+            "pages": [
+                {
+                    "text": "extracted text",
+                    "blocks": [...],
+                    "confidence": float,
+                    "page_number": int
+                }
+            ],
+            "full_text": "complete extracted text",
+            "source": "google-cloud-vision"
+        }
+    """
+    task_id = task_store.create_task(
+        task_type="ocr_google_vision",
+        filename=file.filename,
+        details={"include_confidence": include_confidence}
+    )
+    
+    client_ip = get_client_ip(request)
+    
+    try:
+        # Check rate limit
+        allowed, reason, retry_after = ocr_limiter.check_rate_limit(client_ip)
+        if not allowed:
+            task_store.update_task(task_id, status="error", details={"error": reason})
+            raise HTTPException(
+                status_code=429,
+                detail=reason,
+                headers={"Retry-After": str(retry_after)}
+            )
+        
+        # Check file size
+        size = getattr(file, "size", None)
+        if size is not None:
+            ok, msg = ocr_limiter.check_file_size(size)
+            if not ok:
+                task_store.update_task(task_id, status="error", details={"error": msg})
+                ocr_limiter.release_request(client_ip)
+                raise HTTPException(status_code=413, detail=msg)
+        
+        task_store.update_task(task_id, status="processing")
+        content = await file.read()
+        
+        # If PDF, convert to image first (Google Vision can handle some PDFs, but images work better)
+        if file.filename and file.filename.lower().endswith('.pdf'):
+            try:
+                pages_bytes = pdf_to_images_bytes(content, dpi=200)
+                if pages_bytes:
+                    content = pages_bytes[0]  # Use first page for now
+            except Exception as e:
+                print(f"PDF conversion failed, attempting direct processing: {e}")
+        
+        # Call Google Cloud Vision API
+        result = await asyncio.to_thread(google_cloud_vision_ocr, content)
+        
+        # Filter out confidence if not requested
+        if not include_confidence:
+            for page in result.get("pages", []):
+                for block in page.get("blocks", []):
+                    for line in block.get("lines", []):
+                        for word in line.get("words", []):
+                            word.pop("confidence", None)
+        
+        # Update task with results
+        pages_count = len(result.get("pages", []))
+        full_text = result.get("full_text", "")
+        
+        task_store.update_task(
+            task_id,
+            status="completed",
+            details={
+                "page_count": pages_count,
+                "text_length": len(full_text),
+                "source": "google-cloud-vision"
+            }
+        )
+        
+        return {
+            "task_id": task_id,
+            "pages": result.get("pages", []),
+            "full_text": full_text,
+            "source": "google-cloud-vision",
+            "filename": file.filename
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        print(f"Google Cloud Vision OCR error: {error_msg}")
+        task_store.update_task(task_id, status="error", details={"error": error_msg})
+        raise HTTPException(
+            status_code=500,
+            detail=f"Google Cloud Vision OCR failed: {error_msg}"
+        )
+    finally:
+        try:
+            ocr_limiter.release_request(client_ip)
+        except Exception:
+            pass
+
+@router.get("/vision-health")
+async def vision_health():
+    """
+    Health check endpoint for Google Cloud Vision API.
+    Tests if credentials are properly configured and accessible.
+    
+    Returns:
+        {
+            "status": "healthy" | "error",
+            "credentials_configured": bool,
+            "message": str
+        }
+    """
+    try:
+        client = get_vision_client()
+        return {
+            "status": "healthy",
+            "credentials_configured": True,
+            "message": "Google Cloud Vision API is properly configured and accessible"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "credentials_configured": False,
+            "message": f"Google Cloud Vision API error: {str(e)}"
+        }

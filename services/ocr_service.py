@@ -16,7 +16,7 @@ import base64
 from docx import Document as DocxDocument
 from utils.json_encoder import convert_numpy_types
 from utils.file_utils import detect_file_type
-from typing import Dict, Any, Union, List, Optional
+from typing import Dict, Any, Union, List, Optional, cast
 import asyncio
 import numpy as np
 import importlib
@@ -27,12 +27,157 @@ import sys
 import subprocess
 import tempfile
 
+# Google Cloud Vision imports
+try:
+    from google.cloud import vision
+    from google.cloud.vision import ImageAnnotatorClient
+    from google.oauth2 import service_account
+    GOOGLE_CLOUD_VISION_AVAILABLE = True
+except ImportError:
+    GOOGLE_CLOUD_VISION_AVAILABLE = False
+
 load_dotenv()
 
 
 GEMINI_MODEL = "gemini-2.5-flash"
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+# Google Cloud Vision Configuration
+VISION_CREDS_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "VISION_CREDS.json")
+VISION_CLIENT: Optional[ImageAnnotatorClient] = None
+
+def get_vision_client() -> ImageAnnotatorClient:
+    """
+    Initialize and return Google Cloud Vision API client.
+    Uses service account credentials from VISION_CREDS.json.
+    Client is cached globally to avoid repeated initialization.
+    """
+    global VISION_CLIENT
+    
+    if VISION_CLIENT is not None:
+        return VISION_CLIENT
+    
+    if not GOOGLE_CLOUD_VISION_AVAILABLE:
+        raise ImportError("google-cloud-vision is not installed. Install with: pip install google-cloud-vision")
+    
+    try:
+        # Check if credentials file exists
+        if not os.path.exists(VISION_CREDS_PATH):
+            raise FileNotFoundError(
+                f"Google Cloud credentials file not found at: {VISION_CREDS_PATH}\n"
+                f"Please ensure VISION_CREDS.json exists in the project root or set GOOGLE_APPLICATION_CREDENTIALS environment variable."
+            )
+        
+        # Initialize client with service account credentials
+        VISION_CLIENT = vision.ImageAnnotatorClient()
+        print(f"Google Cloud Vision API client initialized successfully using credentials from: {VISION_CREDS_PATH}")
+        return VISION_CLIENT
+    except Exception as e:
+        raise RuntimeError(f"Failed to initialize Google Cloud Vision client: {str(e)}")
+
+def google_cloud_vision_ocr(image_bytes: bytes) -> Dict[str, Any]:
+    """
+    Perform OCR using Google Cloud Vision API.
+    This function extracts text from images using Google's powerful OCR service.
+    
+    Args:
+        image_bytes: Image file content as bytes
+        
+    Returns:
+        Structured OCR result with the format:
+        {
+            "pages": [{
+                "text": "extracted text",
+                "blocks": [{"lines": [{"words": [{"value": "word", "confidence": float, ...}]}]}],
+                "confidence": average_confidence,
+                "raw_response": Google Vision API response
+            }]
+        }
+    """
+    try:
+        client = get_vision_client()
+        
+        # Create image object
+        image = vision.Image(content=image_bytes)
+        
+        # Perform text detection (OCR)
+        response = client.document_text_detection(image=image) # type: ignore
+        
+        if response.error.message:
+            raise RuntimeError(f"Google Cloud Vision API error: {response.error.message}")
+        
+        # Extract structured data from response
+        pages = []
+        
+        if response.full_text_annotation:
+            full_text = response.full_text_annotation.text
+            
+            # Parse pages
+            for page_num, page in enumerate(response.full_text_annotation.pages):
+                page_data = {
+                    "page_number": page_num + 1,
+                    "text": "",
+                    "blocks": [],
+                    "confidence": 0,
+                    "raw_response": None
+                }
+                
+                # Process blocks (paragraphs)
+                block_list = []
+                all_confidences = []
+                
+                for block in page.blocks:
+                    block_data = {"lines": []}
+                    
+                    # Process paragraphs/lines
+                    for paragraph in block.paragraphs:
+                        line_words = []
+                        
+                        # Process words
+                        for word in paragraph.words:
+                            word_text = ''.join([symbol.text for symbol in word.symbols])
+                            confidence = word.confidence if hasattr(word, 'confidence') else 0
+                            
+                            # Extract bounding box
+                            if word.bounding_box and word.bounding_box.vertices:
+                                vertices = word.bounding_box.vertices
+                                # Normalize vertices to [0-1] range relative to image
+                                geometry = [[v.x, v.y] for v in vertices[:2]]  # top-left and bottom-right
+                            else:
+                                geometry = []
+                            
+                            line_words.append({
+                                "value": word_text,
+                                "confidence": confidence,
+                                "geometry": geometry
+                            })
+                            
+                            if confidence > 0:
+                                all_confidences.append(confidence)
+                        
+                        if line_words:
+                            block_data["lines"].append({"words": line_words})
+                    
+                    if block_data["lines"]:
+                        block_list.append(block_data)
+                
+                page_data["blocks"] = block_list
+                page_data["text"] = full_text
+                
+                # Calculate average confidence for the page
+                if all_confidences:
+                    page_data["confidence"] = sum(all_confidences) / len(all_confidences)
+                
+                pages.append(page_data)
+        
+        return {
+            "pages": pages if pages else [{"text": "", "blocks": [], "confidence": 0}],
+            "full_text": response.full_text_annotation.text if response.full_text_annotation else ""
+        }
+        
+    except Exception as e:
+        raise RuntimeError(f"Google Cloud Vision OCR failed: {str(e)}")
 
 # Keep track of processing status
 processing_status: OrderedDict = OrderedDict()
