@@ -691,8 +691,44 @@ async def extract_text_full(ocrreq: Request, file: UploadFile = File(...)):
                 # If not an image (e.g., PDF), skip rotation and continue
                 pass
 
-        # Submit job to the OCR queue; worker creates/disposes predictor
-        exported = await ocr_queue.submit(_worker_process_full, content, file.filename or "uploaded", client_ip)
+        # Try Google Cloud Vision API first
+        try:
+            print(f"Attempting Google Cloud Vision OCR for {file.filename}")
+            vision_result = await asyncio.to_thread(google_cloud_vision_ocr, content)
+
+            # Convert Vision result to expected format
+            exported = {
+                "pages": vision_result.get("pages", []),
+                "source": "google-cloud-vision"
+            }
+
+            task_store.update_task(
+                task_id,
+                status="completed",
+                details={
+                    "page_count": len(exported.get("pages", [])),
+                    "source": "google-cloud-vision",
+                    "full_text_length": len(vision_result.get("full_text", ""))
+                }
+            )
+            return {"result": exported, "task_id": task_id}
+
+        except Exception as vision_error:
+            print(f"Google Cloud Vision failed for {file.filename}: {vision_error}")
+            print("Falling back to DocTR OCR...")
+
+            # Fallback to DocTR
+            exported = await ocr_queue.submit(_worker_process_full, content, file.filename or "uploaded", client_ip)
+
+            task_store.update_task(
+                task_id,
+                status="completed",
+                details={
+                    "page_count": len(exported.get("pages", [])) if isinstance(exported, dict) else 0,
+                    "source": "doctr_fallback",
+                    "vision_error": str(vision_error)
+                }
+            )
 
         # Attach normalized per-word bbox to exported result (frontend can map to pixels)
         try:
@@ -701,11 +737,6 @@ async def extract_text_full(ocrreq: Request, file: UploadFile = File(...)):
             # non-fatal: continue returning original exported if augmentation fails
             pass
 
-        task_store.update_task(
-            task_id,
-            status="completed",
-            details={"page_count": len(exported.get("pages", [])) if isinstance(exported, dict) else 0}
-        )
         return {"result": exported, "task_id": task_id}
     except Exception as e:
         task_store.update_task(task_id, status="error", details={"error": str(e)})
@@ -791,110 +822,108 @@ async def extract_text_region(
 
             img = img.crop(bbox)
 
-        # ---------- Rotate AFTER cropping (OCR-only) ----------
-        # rotation = int(round(rotation)) % 360
-        # if rotation in (90, 180, 270):
-        #     img = img.rotate(-rotation, expand=True)
+        # ---------- Try Google Cloud Vision API first ----------
+        try:
+            print(f"Attempting Google Cloud Vision OCR for region extraction on {file.filename}")
+            
+            # Convert cropped image to bytes for Vision API
+            buf = io.BytesIO()
+            img.save(buf, format="PNG", optimize=True)
+            img_bytes = buf.getvalue()
+            
+            # Use Google Cloud Vision
+            vision_result = await asyncio.to_thread(google_cloud_vision_ocr, img_bytes)
+            
+            # Extract text and confidence from Vision result
+            full_text = vision_result.get("full_text", "")
+            
+            # Calculate average confidence
+            confidences = []
+            for page in vision_result.get("pages", []):
+                for block in page.get("blocks", []):
+                    for line in block.get("lines", []):
+                        for word in line.get("words", []):
+                            if "confidence" in word and word["confidence"] is not None:
+                                confidences.append(word["confidence"])
+            
+            avg_confidence = round(sum(confidences) / len(confidences), 2) if confidences else 0.0
 
-        # ---------- Google Vision path ----------
-            try:
-                import base64
-                import requests
-                from google.auth import default as google_auth_default
-                from google.auth.transport.requests import AuthorizedSession
-
-                creds, _ = google_auth_default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-                authed = AuthorizedSession(creds)
-
-                buf = io.BytesIO()
-                img.save(buf, format="PNG", optimize=True)
-                img_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-
-                payload = {
-                    "requests": [
-                        {
-                            "image": {"content": img_b64},
-                            "features": [{"type": "TEXT_DETECTION", "maxResults": 1}]
-                        }
-                    ]
+            task_store.update_task(
+                task_id, 
+                status="completed", 
+                details={
+                    "text_length": len(full_text),
+                    "source": "google-cloud-vision",
+                    "confidence": avg_confidence
                 }
+            )
+            return {
+                "text": full_text, 
+                "confidence": avg_confidence, 
+                "task_id": task_id,
+                "source": "google-cloud-vision"
+            }
 
-                resp = authed.post("https://vision.googleapis.com/v1/images:annotate", json=payload, timeout=30)
-                resp.raise_for_status()
-                data = resp.json()
-                resp0 = data.get("responses", [{}])[0]
-                text = (
-                    resp0.get("fullTextAnnotation", {}) or {}
-                ).get("text") or (
-                    resp0.get("textAnnotations", [{}])[0].get("description", "")
-                ) or ""
+        except Exception as vision_error:
+            print(f"Google Cloud Vision failed for region extraction on {file.filename}: {vision_error}")
+            print("Falling back to DocTR OCR...")
 
-                confidences = []
-                for page in resp0.get("fullTextAnnotation", {}).get("pages", []):
-                    for block in page.get("blocks", []):
-                        for para in block.get("paragraphs", []):
-                            for word in para.get("words", []):
-                                if "confidence" in word:
-                                    confidences.append(word["confidence"])
+            # ---------- DocTR / worker path (fallback) ----------
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
 
-                conf = round(sum(confidences) / len(confidences), 2) if confidences else 0.0
+            result = await ocr_queue.submit(
+                _worker_process_region,
+                buf.getvalue(),
+                file.filename or "uploaded",
+                client_ip,
+                None  # bbox already applied
+            )
 
-                task_store.update_task(task_id, status="completed", details={"text_length": len(text)})
-                return {"text": text, "confidence": conf, "task_id": task_id}
-
-            except Exception as e:
-                print("Google Vision failed, falling back to DocTR:", e)
-
-        # ---------- DocTR / worker path ----------
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-
-        result = await ocr_queue.submit(
-            _worker_process_region,
-            buf.getvalue(),
-            file.filename or "uploaded",
-            client_ip,
-            None  # bbox already applied
-        )
-
-        for page in result.get("pages", []):
-            if not isinstance(page, dict):
-                continue
-            for block in page.get("blocks", []) or []:
-                if not isinstance(block, dict):
+            for page in result.get("pages", []):
+                if not isinstance(page, dict):
                     continue
-                for line in block.get("lines", []) or []:
-                    if not isinstance(line, dict):
+                for block in page.get("blocks", []) or []:
+                    if not isinstance(block, dict):
                         continue
-                    for word in line.get("words", []) or []:
-                        if isinstance(word, dict):
-                            wval = word.get("value")
-                            geom = word.get("geometry")
-                        else:
-                            wval = None
-                            geom = None
-                        print(f"WORD: {wval!r} GEOM: {geom!r}")
+                    for line in block.get("lines", []) or []:
+                        if not isinstance(line, dict):
+                            continue
+                        for word in line.get("words", []) or []:
+                            if isinstance(word, dict):
+                                wval = word.get("value")
+                                geom = word.get("geometry")
+                            else:
+                                wval = None
+                                geom = None
+                            print(f"WORD: {wval!r} GEOM: {geom!r}")
 
-        # If client provided a bbox we may have applied it; otherwise the client already sent a cropped image.
-        if bbox is not None:
-            print("Applied bbox (pixels):", bbox)
-        else:
-            print("No bbox provided; image already cropped by client.")
+            # If client provided a bbox we may have applied it; otherwise the client already sent a cropped image.
+            if bbox is not None:
+                print("Applied bbox (pixels):", bbox)
+            else:
+                print("No bbox provided; image already cropped by client.")
 
-        print("DocTR pages:", result.get("pages", []))
+            print("DocTR pages:", result.get("pages", []))
 
 
-        task_store.update_task(
-            task_id,
-            status="completed",
-            details={"text_length": len(result.get("text", "")), "confidence": result.get("confidence", 0.0)}
-        )
+            task_store.update_task(
+                task_id,
+                status="completed",
+                details={
+                    "text_length": len(result.get("text", "")), 
+                    "confidence": result.get("confidence", 0.0),
+                    "source": "doctr_fallback",
+                    "vision_error": str(vision_error)
+                }
+            )
 
-        return {
-            "text": result.get("text", ""),
-            "confidence": result.get("confidence", 0.0),
-            "task_id": task_id
-        }
+            return {
+                "text": result.get("text", ""),
+                "confidence": result.get("confidence", 0.0),
+                "task_id": task_id,
+                "source": "doctr_fallback"
+            }
 
     except Exception as e:
         task_store.update_task(task_id, status="error", details={"error": str(e)})
