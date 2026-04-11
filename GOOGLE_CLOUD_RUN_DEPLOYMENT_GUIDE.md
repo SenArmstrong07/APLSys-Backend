@@ -17,7 +17,7 @@ This guide provides step-by-step instructions to deploy the APLSys Backend (Fast
 # Login to Google Cloud
 gcloud auth login
 
-# Set your project ID (replace with your actual project ID)
+# Set your project ID (replace with your actual project ID once you've created your Google CLoud Run Hub)
 gcloud config set project YOUR_PROJECT_ID
 
 # Verify the project is set
@@ -34,8 +34,8 @@ gcloud services enable run.googleapis.com
 # Enable Cloud Vision API (required for OCR functionality)
 gcloud services enable vision.googleapis.com
 
-# Enable Container Registry API (for storing Docker images)
-gcloud services enable containerregistry.googleapis.com
+# Enable Artifact Registry API (for storing Docker images)
+gcloud services enable artifactregistry.googleapis.com
 
 # Enable Cloud Build API (for building containers)
 gcloud services enable cloudbuild.googleapis.com
@@ -70,8 +70,8 @@ gcloud iam service-accounts keys create vision-creds.json \
 ### 3.1 Clone and Prepare Repository
 ```bash
 # Clone your repository
-git clone https://github.com/SenArmstrong07/aplservice.git
-cd aplservice
+git clone https://github.com/SenArmstrong07/APLSys-Backend.git
+cd APLSys-Backend
 
 # Copy the new service account key
 cp ~/vision-creds.json VISION_CREDS.json
@@ -170,7 +170,6 @@ gcloud run services update aplservice \
     --set-env-vars "GEMINI_API_KEY=YOUR_GEMINI_KEY" \
     --set-env-vars "OPENROUTER_API_KEY=YOUR_OPENROUTER_KEY" \
     --set-env-vars "OPENROUTER_MODEL=deepseek/deepseek-chat-v3.1:free" \
-    --set-env-vars "FREEOCR=YOUR_FREEOCR_KEY" \
     --region asia-southeast1
 ```
 
@@ -286,14 +285,6 @@ gcloud run services update aplservice \
     --region asia-southeast1
 ```
 
-### 11.2 Set Up Budget Alerts
-```bash
-# Create budget alert
-gcloud billing budgets create "APLSys Budget" \
-    --billing-account=YOUR_BILLING_ACCOUNT_ID \
-    --amount=100 \
-    --thresholds=50,90,100
-```
 
 ## Troubleshooting
 
@@ -341,7 +332,6 @@ gcloud run services delete aplservice --region asia-southeast1
 | `GEMINI_API_KEY` | Google Gemini API key | Yes |
 | `OPENROUTER_API_KEY` | OpenRouter API key | Yes |
 | `OPENROUTER_MODEL` | OpenRouter model name | Yes |
-| `FREEOCR` | Free OCR service key | Optional |
 | `PORT` | Port for the application (default: 8080) | No |
 
 ## Support
