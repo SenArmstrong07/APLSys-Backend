@@ -9,29 +9,46 @@ from services.ocr_service import get_memory_usage,create_doctr_ocr, dispose_doct
 import psutil
 from utils.task_store import TaskStore
 from utils.mem_bar import memory_bar
+from google import genai
+from google.auth import default
+from google.auth.transport.requests import Request
 router = APIRouter()
 load_dotenv()
 
 BASE_URL = "https://generativelanguage.googleapis.com/v1"
-GEMINI_API_KEY = getenv("GEMINI_API_KEY")
+
+
+def get_gcp_credentials():
+    credentials, _ = default()
+    if not credentials.valid or credentials.expired:
+        credentials.refresh(Request())
+    return credentials
+
+
+def get_gemini_headers():
+    headers = {"Content-Type": "application/json"}
+    token = get_gcp_credentials().token
+    headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def get_gemini_client():
+    return genai.Client(credentials=get_gcp_credentials())
 
 
 @router.get("/test-gemini-key")
 async def test_gemini_key():
-    """Quick test of Gemini API key validity using google.genai"""
-    if not GEMINI_API_KEY:
-        return {"error": "GEMINI_API_KEY not set"}
-
+    """Quick test of Gemini access using ADC credentials or GEMINI_API_KEY."""
     try:
-        from google import genai
-        client = genai.Client(api_key=GEMINI_API_KEY)
+        client = get_gemini_client()
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.1-pro-preview",
             contents="Say hello"
         )
         # If we get here, the key is valid and the API responded
         return {
             "status": "OK",
+            "auth_source": "ADC",
             "response": getattr(response, "text", str(response))[:500]
         }
     except Exception as e:
@@ -41,17 +58,14 @@ async def test_gemini_key():
 @router.get("/list-models")
 async def list_models():
     url = f"{BASE_URL}/models"
-    headers = {
-        "Content-Type": "application/json",
-        "x-goog-api-key": GEMINI_API_KEY
-    }
+    headers = get_gemini_headers()
     try:
         response = requests.get(url, headers=headers)
         response.raise_for_status()
         return response.json()
     except Exception as e:
         print("Error listing models:", str(e))
-        return {"error": "Failed to fetch models"}
+        return {"error": "Failed to fetch models", "details": str(e)}
     
     
 @router.post("/unload-models")

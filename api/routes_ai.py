@@ -1,6 +1,5 @@
 from fastapi import APIRouter, UploadFile, File, Form, Query, HTTPException, Request, status, Response
 from model.request_schema import ClassifyRequest, ResumeAnalysisRequest
-from google import genai
 import requests
 from os import getenv
 import time
@@ -17,8 +16,10 @@ import io
 import json
 from model.request_schema import ResumeTextRequest, TextRequest
 from services.ai_service import (
-    gemini_extract_resume_profile,
     deepseek_extract_metadata_from_text,
+    gemini_extract_resume_profile,
+    get_gemini_client,
+    get_gemini_headers,
     validate_resume_text
 )
 from utils.task_store import TaskStore
@@ -29,7 +30,6 @@ load_dotenv()
 
 GEMINI_MODEL = "gemini-2.5-flash"
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
-GEMINI_API_KEY = getenv("GEMINI_API_KEY")
 
 GEMINI_RATE_LIMIT_LOCK = threading.Lock()
 GEMINI_LAST_CALL_TIME = 0.0
@@ -208,10 +208,10 @@ async def gemini_extract_resume_profile_endpoint(req: ResumeTextRequest, request
         task_store.update_task(task_id, status="processing")
 
         # 1) Primary: Gemini
-        # try:
-        #     result = gemini_extract_resume_profile(req.text)
-        # except Exception as e:
-        #     result = {"error": f"gemini_call_failed: {str(e)}"}
+        try:
+            result = gemini_extract_resume_profile(req.text)
+        except Exception as e:
+            result = {"error": f"gemini_call_failed: {str(e)}"}
         
         result = await call_gemini_with_retries(req.text, attempts=3, base_delay=1.0, max_delay=8.0)
 
@@ -315,10 +315,7 @@ async def batch_analyze_resumes(
 
             # Call Gemini API (reuse your analyze logic)
             url = f"{BASE_URL}/models/{GEMINI_MODEL}:generateContent"
-            headers = {
-                "Content-Type": "application/json",
-                "x-goog-api-key": GEMINI_API_KEY
-            }
+            headers = get_gemini_headers()
             payload = {
                 "contents": [
                     {
@@ -377,12 +374,8 @@ async def analyze_resume(req: ResumeAnalysisRequest, request: Request):
         }
     )
 
-    if not GEMINI_API_KEY:
-        task_store.update_task(task_id, status="error", details={"error": "GEMINI_API_KEY not set"})
-        return {"error": "GEMINI_API_KEY not set in environment"}
-
     prompt = build_prompt(req)
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    client = get_gemini_client()
 
     try:
         task_store.update_task(task_id, status="processing")
@@ -489,10 +482,7 @@ async def classify_text(req: ClassifyRequest):
     )
 
     url = f"{BASE_URL}/models/{GEMINI_MODEL}:generateContent"
-    headers = {
-        "Content-Type": "application/json",
-        "x-goog-api-key": GEMINI_API_KEY
-    }
+    headers = get_gemini_headers()
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
 
     try:
@@ -515,10 +505,7 @@ async def classify_text(req: ClassifyRequest):
 def detect_table_layout(image_path):
     image_b64 = image_to_base64(image_path)
     url = f"{BASE_URL}/models/{GEMINI_MODEL}:generateContent"
-    headers = {
-        "Content-Type": "application/json",
-        "x-goog-api-key": GEMINI_API_KEY
-    }
+    headers = get_gemini_headers()
     prompt = (
         "Analyze the following image and describe the table layout. "
         "List the number of tables, their positions (bounding boxes), and the number of rows and columns for each table. "

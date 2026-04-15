@@ -2,6 +2,9 @@ import requests
 import os
 import json
 from dotenv import load_dotenv
+from google import genai
+from google.auth import default
+from google.auth.transport.requests import Request
 from utils.img_to_b64 import image_to_base64
 from utils.openrouter_client import client, OPENROUTER_MODEL, OPENROUTER_API_KEY
 import time
@@ -11,8 +14,34 @@ import re
 load_dotenv()
 
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
-GEMINI_MODEL = "gemini-2.5-flash"
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = "gemini-3.1-pro-preview"
+GEMINI_AUTH_SCOPE = os.getenv("GEMINI_AUTH_SCOPE", "https://www.googleapis.com/auth/cloud-platform")
+
+
+def get_gcp_access_token(scopes=None) -> str:
+    """Return a Google OAuth access token from ADC / Cloud Run service account."""
+    scopes = scopes or [GEMINI_AUTH_SCOPE]
+    credentials, _ = default(scopes=scopes)
+    if not credentials.valid or credentials.expired:
+        credentials.refresh(Request())
+    return credentials.token
+
+
+def get_gemini_headers() -> dict:
+    """Build Gemini request headers using API key if provided, otherwise ADC bearer token."""
+    headers = {"Content-Type": "application/json"}
+    token = get_gcp_access_token()
+    headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def get_gemini_client():
+    """Create a Gemini client using API key or ADC credentials."""
+    credentials, _ = default()
+    if not credentials.valid or credentials.expired:
+        credentials.refresh(Request())
+    return genai.Client(credentials=credentials)
+
 
 def validate_resume_text(text: str) -> bool:
     """Basic validation to check if text looks like a resume"""
@@ -34,10 +63,7 @@ def gemini_extract_resume_profile(full_text: str, model_name=GEMINI_MODEL) -> di
     load_dotenv()
     model = model_name or os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     url = f"{BASE_URL}/models/{model}:generateContent"
-    headers = {
-        "Content-Type": "application/json",
-        "x-goog-api-key": GEMINI_API_KEY
-    }
+    headers = get_gemini_headers()
 
     # Minimalization strategy:
     # - keep top-of-resume header (first 8 non-empty lines)
@@ -219,14 +245,11 @@ def gemini_classify_document(text: str, attempts: int = 3, base_delay: float = 1
     Ask Gemini to classify document type. Returns a dict (expected keys: 'type', 'confidence', ...).
     On failure returns {'error': ...}
     """
-    if not text or not GEMINI_API_KEY:
-        return {"error": "No text or GEMINI_API_KEY not set"}
+    if not text:
+        return {"error": "No text provided"}
 
     url = f"{BASE_URL}/models/{GEMINI_MODEL}:generateContent"
-    headers = {
-        "Content-Type": "application/json",
-        "x-goog-api-key": GEMINI_API_KEY
-    }
+    headers = get_gemini_headers()
 
     prompt = (
         "Classify the type of the following document. "
