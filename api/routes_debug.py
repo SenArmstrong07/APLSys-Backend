@@ -42,7 +42,7 @@ async def test_gemini_key():
     try:
         client = get_gemini_client()
         response = client.models.generate_content(
-            model="gemini-3.1-pro-preview",
+            model="gemini-2.5-flash",
             contents="Say hello"
         )
         # If we get here, the key is valid and the API responded

@@ -14,7 +14,7 @@ import re
 load_dotenv()
 
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
-GEMINI_MODEL = "gemini-3.1-pro-preview"
+GEMINI_MODEL = "gemini-2.5-flash"
 GEMINI_AUTH_SCOPE = os.getenv("GEMINI_AUTH_SCOPE", "https://www.googleapis.com/auth/cloud-platform")
 
 
