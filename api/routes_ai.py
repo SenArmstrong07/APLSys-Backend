@@ -1,6 +1,7 @@
 from fastapi import APIRouter, UploadFile, File, Form, Query, HTTPException, Request, status, Response
 from model.request_schema import ClassifyRequest, ResumeAnalysisRequest
 import requests
+import logging
 from os import getenv
 import time
 import threading
@@ -211,76 +212,77 @@ async def gemini_extract_resume_profile_endpoint(req: ResumeTextRequest, request
         try:
             result = gemini_extract_resume_profile(req.text)
         except Exception as e:
+            logging.exception("Gemini call failed")
             result = {"error": f"gemini_call_failed: {str(e)}"}
         
         result = await call_gemini_with_retries(req.text, attempts=3, base_delay=1.0, max_delay=8.0)
 
-        # If Gemini returned an explicit error or empty dict -> fallback to OpenRouter
-        if not isinstance(result, dict) or ("error" in result) or (isinstance(result, dict) and not result):
-            # Build a compact JSON-only prompt for OpenRouter to extract a resume profile
-            prompt = (
-                "You are an expert resume extractor. Return EXACTLY one JSON object and NOTHING ELSE.\n"
-                "Fields required (use these keys exactly):\n"
-                "profile: {firstName, middleName, lastName, email, phone, location, summary},\n"
-                "educations: [{school, degree, startDate, endDate, details}],\n"
-                "work_experiences: [{company, title, startDate, endDate, descriptions}],\n"
-                "skills: [strings],\n"
-                "certifications: [strings]\n\n"
-                f"Resume Text:\n{req.text}\n\n"
-                "Return only the JSON object."
-            )
+        # # If Gemini returned an explicit error or empty dict -> fallback to OpenRouter
+        # if not isinstance(result, dict) or ("error" in result) or (isinstance(result, dict) and not result):
+        #     # Build a compact JSON-only prompt for OpenRouter to extract a resume profile
+        #     prompt = (
+        #         "You are an expert resume extractor. Return EXACTLY one JSON object and NOTHING ELSE.\n"
+        #         "Fields required (use these keys exactly):\n"
+        #         "profile: {firstName, middleName, lastName, email, phone, location, summary},\n"
+        #         "educations: [{school, degree, startDate, endDate, details}],\n"
+        #         "work_experiences: [{company, title, startDate, endDate, descriptions}],\n"
+        #         "skills: [strings],\n"
+        #         "certifications: [strings]\n\n"
+        #         f"Resume Text:\n{req.text}\n\n"
+        #         "Return only the JSON object."
+        #     )
 
-            try:
-                # Use OpenRouter client (same style as analyze-resume)
-                extra_headers = {}
-                if OPENROUTER_API_KEY is None:
-                    raise RuntimeError("OPENROUTER_API_KEY not set")
+        #     try:
+        #         # Use OpenRouter client (same style as analyze-resume)
+        #         extra_headers = {}
+        #         if OPENROUTER_API_KEY is None:
+        #             raise RuntimeError("OPENROUTER_API_KEY not set")
 
-                completion = client.chat.completions.create(
-                    extra_headers=extra_headers,
-                    extra_body={},
-                    model=OPENROUTER_MODEL,
-                    messages=[
-                        {"role": "system", "content": "You are an expert resume extractor. RETURN JSON ONLY."},
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=0.0,
-                    max_tokens=800,
-                )
-                text = completion.choices[0].message.content or ""
-                cleaned = clean_model_artifacts(text)
-                # Try to extract JSON object from cleaned text
-                start = cleaned.find("{")
-                end = cleaned.rfind("}") + 1
-                if start == -1 or end == 0:
-                    # both Gemini and OpenRouter failed to return parseable JSON
-                    task_store.update_task(task_id, status="error", details={"error": "No JSON from Gemini or OpenRouter", "gemini": result, "openrouter_raw": cleaned[:1000]})
-                    return {"error": "Failed to extract structured resume (no JSON returned)", "task_id": task_id, "details": {"gemini": result, "openrouter_raw": cleaned[:1000]}}
-                parsed = json.loads(cleaned[start:end])
-                task_store.update_task(
-                    task_id,
-                    status="completed",
-                    details={"profile_sections": len(parsed) if isinstance(parsed, dict) else 0, "source": "openrouter_fallback"}
-                )
-                print("DEBUG GEMINI RESULT (fallback -> openrouter):", parsed)
-                return {**parsed, "task_id": task_id, "source": "openrouter_fallback"}
-            except Exception as e:
-                task_store.update_task(task_id, status="error", details={"error": str(e)})
-                raise
-        else:
+        #         completion = client.chat.completions.create(
+        #             extra_headers=extra_headers,
+        #             extra_body={},
+        #             model=OPENROUTER_MODEL,
+        #             messages=[
+        #                 {"role": "system", "content": "You are an expert resume extractor. RETURN JSON ONLY."},
+        #                 {"role": "user", "content": prompt},
+        #             ],
+        #             temperature=0.0,
+        #             max_tokens=800,
+        #         )
+        #         text = completion.choices[0].message.content or ""
+        #         cleaned = clean_model_artifacts(text)
+        #         # Try to extract JSON object from cleaned text
+        #         start = cleaned.find("{")
+        #         end = cleaned.rfind("}") + 1
+        #         if start == -1 or end == 0:
+        #             # both Gemini and OpenRouter failed to return parseable JSON
+        #             task_store.update_task(task_id, status="error", details={"error": "No JSON from Gemini or OpenRouter", "gemini": result, "openrouter_raw": cleaned[:1000]})
+        #             return {"error": "Failed to extract structured resume (no JSON returned)", "task_id": task_id, "details": {"gemini": result, "openrouter_raw": cleaned[:1000]}}
+        #         parsed = json.loads(cleaned[start:end])
+        #         task_store.update_task(
+        #             task_id,
+        #             status="completed",
+        #             details={"profile_sections": len(parsed) if isinstance(parsed, dict) else 0, "source": "openrouter_fallback"}
+        #         )
+        #         print("DEBUG GEMINI RESULT (fallback -> openrouter):", parsed)
+        #         return {**parsed, "task_id": task_id, "source": "openrouter_fallback"}
+        #     except Exception as e:
+        #         task_store.update_task(task_id, status="error", details={"error": str(e)})
+        #         raise
+        # else:
             # Gemini succeeded
-            task_store.update_task(
-                task_id,
-                status="completed",
-                details={"profile_sections": len(result) if isinstance(result, dict) else 0, "source": "gemini"}
-            )
-            print("DEBUG GEMINI RESULT:", result)
-            return {**result, "task_id": task_id, "source": "gemini"}
+        task_store.update_task(
+            task_id,
+            status="completed",
+            details={"profile_sections": len(result) if isinstance(result, dict) else 0, "source": "gemini"}
+        )
+        print("DEBUG GEMINI RESULT:", result)
+        return {**result, "task_id": task_id, "source": "gemini"}
     except Exception as e:
         task_store.update_task(task_id, status="error", details={"error": str(e)})
         raise
 
-@router.post("/batch-analyze-resumes")
+@router.post("/batch-analyze-resumes") # endpoint is for batch analyzing multiple cvs at once but unused.
 async def batch_analyze_resumes(
     files: List[UploadFile] = File(...),
     job_role: Optional[str] = Form(None),
