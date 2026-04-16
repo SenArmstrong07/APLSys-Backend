@@ -37,6 +37,20 @@ def get_gemini_client():
     return genai.Client(credentials=credentials)
 
 
+def get_openrouter_client():
+    """Get the OpenRouter client and model configuration."""
+    from utils.openrouter_client import client as openrouter_client, OPENROUTER_MODEL, OPENROUTER_API_KEY
+    
+    if not OPENROUTER_API_KEY:
+        raise RuntimeError("OPENROUTER_API_KEY not set in environment")
+    
+    return {
+        "client": openrouter_client,
+        "model": OPENROUTER_MODEL,
+        "api_key": OPENROUTER_API_KEY
+    }
+
+
 def validate_resume_text(text: str) -> bool:
     """Basic validation to check if text looks like a resume"""
     resume_indicators = [
@@ -279,163 +293,5 @@ def gemini_classify_document(text: str, attempts: int = 3, base_delay: float = 1
             last_exc = e
             time.sleep(base_delay * (2 ** attempt))
     return {"error": f"gemini_failed: {str(last_exc)}"}
-
-
-def gemini_parse_and_analyze_resume(
-    resume_text: str, 
-    job_role: str = None,  # type: ignore
-    job_description: str = None, # type: ignore
-    model_name: str = GEMINI_MODEL
-) -> dict:
-    """
-    Combined function: Parse resume into structured JSON AND analyze it in ONE Gemini call.
-    
-    Returns a structured JSON object with:
-    {
-        "parsed_data": {
-            "profile": {...},
-            "educations": [...],
-            "workExperiences": [...],
-            "skills": [...]
-        },
-        "analysis_results": {
-            "skills_analysis": {...},
-            "experience_analysis": {...},
-            "education_analysis": {...},
-            "strengths": [...],
-            "role_alignment": {...},  // if job_role provided
-            "job_match": {...},  // if job_description provided
-            "overall_assessment": "..."
-        }
-    }
-    """
-    load_dotenv()
-    model = model_name or os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-    url = f"{BASE_URL}/models/{model}:generateContent"
-    headers = get_gemini_headers(use_api_key=True)
-    
-    # Minimalize resume to avoid token overflow
-    lines = [ln.strip() for ln in resume_text.splitlines() if ln.strip()]
-    header = "\n".join(lines[:8]) if lines else resume_text[:200]
-    tail = resume_text[:3000] if len(resume_text) > 3000 else resume_text
-    minimized = f"{header}\n\n{tail}"
-    
-    # Build combined prompt
-    parsing_instructions = """
-PART 1: PARSING
-Extract the resume into a JSON object with these exact fields:
-{
-    "profile": {"firstName": "", "middleName": "", "lastName": "", "email": "", "phone": "", "location": "", "summary": ""},
-    "educations": [{"school": "", "degree": "", "gpa": "", "date": ""}],
-    "workExperiences": [{"company": "", "jobTitle": "", "date": "", "descriptions": []}],
-    "skills": []
-}
-"""
-    
-    analysis_instructions = """
-PART 2: ANALYSIS
-Provide analysis in JSON format:
-{
-    "skills_analysis": {
-        "proficiency_summary": "brief summary",
-        "missing_skills": ["skill1", "skill2", "skill3"],
-        "score": 0
-    },
-    "experience_analysis": {
-        "assessment": "brief assessment",
-        "score": 0
-    },
-    "education_analysis": {
-        "assessment": "brief assessment",
-        "score": 0
-    },
-    "key_strengths": ["strength1", "strength2", "strength3"],
-    "resume_score": 0
-"""
-    
-    if job_role:
-        analysis_instructions += f"""
-    "role_alignment": {{
-        "role": "{job_role}",
-        "alignment_assessment": "brief assessment",
-        "recommendations": "1-2 focused recommendations"
-    }},
-"""
-    
-    if job_description:
-        analysis_instructions += f"""
-    "job_match": {{
-        "match_percentage": 0,
-        "comparison": "brief comparison",
-        "critical_missing": ["requirement1", "requirement2", "requirement3"],
-        "suggestion": "1-line suggestion"
-    }},
-"""
-    
-    analysis_instructions += f"""
-    "overall_assessment": {{
-        "hiring_recommendation": "HIRE or DO NOT HIRE",
-        "justification": "brief justification"
-    }}
-}}
-"""
-    
-    combined_prompt = f"""{parsing_instructions}
-{analysis_instructions}
-
-Resume Text:
-{minimized}
-
-IMPORTANT: Return ONLY a valid JSON object combining both parts, no explanation, no markdown. 
-The response should have "parsed_data" and "analysis_results" as top-level keys."""
-    
-    payload = {"contents": [{"parts": [{"text": combined_prompt}]}]}
-    
-    # Retry logic with 429 and 503 handling
-    for attempt in range(3):
-        try:
-            resp = requests.post(url, json=payload, headers=headers, timeout=30)
-            
-            if resp.status_code in (503, 429):
-                time.sleep(2 ** attempt)
-                continue
-            
-            resp.raise_for_status()
-            data = resp.json()
-            text = (
-                data.get("candidates", [{}])[0]
-                    .get("content", {})
-                    .get("parts", [{}])[0]
-                    .get("text", "")
-            )
-            
-            # Extract JSON from response
-            try:
-                start = text.find('{')
-                end = text.rfind('}') + 1
-                result = json.loads(text[start:end])
-                
-                # Ensure proper structure
-                if "parsed_data" not in result:
-                    result = {"parsed_data": result, "analysis_results": {}}
-                
-                return result
-            except Exception as e:
-                return {
-                    "error": "Failed to parse combined response",
-                    "raw": text[:500],
-                    "attempt": attempt + 1
-                }
-        
-        except requests.exceptions.HTTPError as e:
-            if resp is not None and resp.status_code in (503, 429):
-                time.sleep(2 ** attempt)
-                continue
-            raise e
-        except requests.exceptions.RequestException:
-            time.sleep(2 ** attempt)
-            continue
-    
-    return {"error": "gemini_parse_and_analyze_failed: Max retries exceeded"}
 
 

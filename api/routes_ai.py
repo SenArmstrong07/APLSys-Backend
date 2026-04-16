@@ -19,8 +19,8 @@ from model.request_schema import ResumeTextRequest, TextRequest
 from services.ai_service import (
     deepseek_extract_metadata_from_text,
     gemini_extract_resume_profile,
-    gemini_parse_and_analyze_resume,
     get_gemini_client,
+    get_openrouter_client,
     validate_resume_text
 )
 from api.routes_debug import get_gemini_headers
@@ -36,7 +36,6 @@ BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 GEMINI_RATE_LIMIT_LOCK = threading.Lock()
 GEMINI_LAST_CALL_TIME = 0.0
 GEMINI_MIN_INTERVAL = 3.0  # minimum seconds between Gemini calls (tweakable)
-GEMINI_SEMAPHORE = asyncio.Semaphore(1)  # Limit to 1 concurrent Gemini request
 
 
 #- **Current Skills**: [List ALL skills the candidate demonstrates in their resume, categorized by type (technical, soft, domain-specific, etc.). Be comprehensive.]
@@ -224,66 +223,66 @@ async def gemini_extract_resume_profile_endpoint(req: ResumeTextRequest, request
         result = await call_gemini_with_retries(req.text, attempts=3, base_delay=1.0, max_delay=8.0)
 
         # # If Gemini returned an explicit error or empty dict -> fallback to OpenRouter
-        # if not isinstance(result, dict) or ("error" in result) or (isinstance(result, dict) and not result):
-        #     # Build a compact JSON-only prompt for OpenRouter to extract a resume profile
-        #     prompt = (
-        #         "You are an expert resume extractor. Return EXACTLY one JSON object and NOTHING ELSE.\n"
-        #         "Fields required (use these keys exactly):\n"
-        #         "profile: {firstName, middleName, lastName, email, phone, location, summary},\n"
-        #         "educations: [{school, degree, startDate, endDate, details}],\n"
-        #         "work_experiences: [{company, title, startDate, endDate, descriptions}],\n"
-        #         "skills: [strings],\n"
-        #         "certifications: [strings]\n\n"
-        #         f"Resume Text:\n{req.text}\n\n"
-        #         "Return only the JSON object."
-        #     )
+        if not isinstance(result, dict) or ("error" in result) or (isinstance(result, dict) and not result):
+            # Build a compact JSON-only prompt for OpenRouter to extract a resume profile
+            prompt = (
+                "You are an expert resume extractor. Return EXACTLY one JSON object and NOTHING ELSE.\n"
+                "Fields required (use these keys exactly):\n"
+                "profile: {firstName, middleName, lastName, email, phone, location, summary},\n"
+                "educations: [{school, degree, startDate, endDate, details}],\n"
+                "work_experiences: [{company, title, startDate, endDate, descriptions}],\n"
+                "skills: [strings],\n"
+                "certifications: [strings]\n\n"
+                f"Resume Text:\n{req.text}\n\n"
+                "Return only the JSON object."
+            )
 
-        #     try:
-        #         # Use OpenRouter client (same style as analyze-resume)
-        #         extra_headers = {}
-        #         if OPENROUTER_API_KEY is None:
-        #             raise RuntimeError("OPENROUTER_API_KEY not set")
+            try:
+                # Use OpenRouter client (same style as analyze-resume)
+                extra_headers = {}
+                if OPENROUTER_API_KEY is None:
+                    raise RuntimeError("OPENROUTER_API_KEY not set")
 
-        #         completion = client.chat.completions.create(
-        #             extra_headers=extra_headers,
-        #             extra_body={},
-        #             model=OPENROUTER_MODEL,
-        #             messages=[
-        #                 {"role": "system", "content": "You are an expert resume extractor. RETURN JSON ONLY."},
-        #                 {"role": "user", "content": prompt},
-        #             ],
-        #             temperature=0.0,
-        #             max_tokens=800,
-        #         )
-        #         text = completion.choices[0].message.content or ""
-        #         cleaned = clean_model_artifacts(text)
-        #         # Try to extract JSON object from cleaned text
-        #         start = cleaned.find("{")
-        #         end = cleaned.rfind("}") + 1
-        #         if start == -1 or end == 0:
-        #             # both Gemini and OpenRouter failed to return parseable JSON
-        #             task_store.update_task(task_id, status="error", details={"error": "No JSON from Gemini or OpenRouter", "gemini": result, "openrouter_raw": cleaned[:1000]})
-        #             return {"error": "Failed to extract structured resume (no JSON returned)", "task_id": task_id, "details": {"gemini": result, "openrouter_raw": cleaned[:1000]}}
-        #         parsed = json.loads(cleaned[start:end])
-        #         task_store.update_task(
-        #             task_id,
-        #             status="completed",
-        #             details={"profile_sections": len(parsed) if isinstance(parsed, dict) else 0, "source": "openrouter_fallback"}
-        #         )
-        #         print("DEBUG GEMINI RESULT (fallback -> openrouter):", parsed)
-        #         return {**parsed, "task_id": task_id, "source": "openrouter_fallback"}
-        #     except Exception as e:
-        #         task_store.update_task(task_id, status="error", details={"error": str(e)})
-        #         raise
-        # else:
-        # Gemini succeeded
-        task_store.update_task(
-            task_id,
-            status="completed",
-            details={"profile_sections": len(result) if isinstance(result, dict) else 0, "source": "gemini"}
-        )
-        print("DEBUG GEMINI RESULT:", result)
-        return {**result, "task_id": task_id, "source": "gemini"}
+                completion = client.chat.completions.create(
+                    extra_headers=extra_headers,
+                    extra_body={},
+                    model=OPENROUTER_MODEL,
+                    messages=[
+                        {"role": "system", "content": "You are an expert resume extractor. RETURN JSON ONLY."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.0,
+                    max_tokens=800,
+                )
+                text = completion.choices[0].message.content or ""
+                cleaned = clean_model_artifacts(text)
+                # Try to extract JSON object from cleaned text
+                start = cleaned.find("{")
+                end = cleaned.rfind("}") + 1
+                if start == -1 or end == 0:
+                    # both Gemini and OpenRouter failed to return parseable JSON
+                    task_store.update_task(task_id, status="error", details={"error": "No JSON from Gemini or OpenRouter", "gemini": result, "openrouter_raw": cleaned[:1000]})
+                    return {"error": "Failed to extract structured resume (no JSON returned)", "task_id": task_id, "details": {"gemini": result, "openrouter_raw": cleaned[:1000]}}
+                parsed = json.loads(cleaned[start:end])
+                task_store.update_task(
+                    task_id,
+                    status="completed",
+                    details={"profile_sections": len(parsed) if isinstance(parsed, dict) else 0, "source": "openrouter_fallback"}
+                )
+                print("DEBUG GEMINI RESULT (fallback -> openrouter):", parsed)
+                return {**parsed, "task_id": task_id, "source": "openrouter_fallback"}
+            except Exception as e:
+                task_store.update_task(task_id, status="error", details={"error": str(e)})
+                raise
+        else:
+            # Gemini succeeded
+            task_store.update_task(
+                task_id,
+                status="completed",
+                details={"profile_sections": len(result) if isinstance(result, dict) else 0, "source": "gemini"}
+            )
+            print("DEBUG GEMINI RESULT:", result)
+            return {**result, "task_id": task_id, "source": "gemini"}
     except Exception as e:
         task_store.update_task(task_id, status="error", details={"error": str(e)})
         raise
@@ -361,7 +360,8 @@ async def batch_analyze_resumes(
 @router.post("/analyze-resume")
 async def analyze_resume(req: ResumeAnalysisRequest, request: Request):
     """
-    Analyze resume using Gemini 2.5 with retries and exponential backoff.
+    PRIMARY: Analyze resume using OpenRouter first, then fallback to Gemini.
+    This endpoint prioritizes OpenRouter over Gemini for better reliability and cost.
     """
     client_ip = getattr(request.client, "host", "unknown")
     allowed, retry_after = check_rate_limit(client_ip)
@@ -382,11 +382,58 @@ async def analyze_resume(req: ResumeAnalysisRequest, request: Request):
         }
     )
 
-    prompt = build_prompt(req)
-    client = get_gemini_client()
-
     try:
         task_store.update_task(task_id, status="processing")
+
+        # Try OpenRouter first (primary choice)
+        try:
+            openrouter_config = get_openrouter_client()
+            client = openrouter_config["client"]
+            model = openrouter_config["model"]
+
+            prompt = build_prompt(req)
+
+            extra_headers = {}
+            referer = getenv("OPENROUTER_REFERER")
+            title = getenv("OPENROUTER_TITLE")
+            if referer:
+                extra_headers["HTTP-Referer"] = referer
+            if title:
+                extra_headers["X-Title"] = title
+
+            response = client.chat.completions.create(
+                extra_headers=extra_headers,
+                extra_body={},
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are an expert resume analyst. Provide structured analysis following the exact format requested."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.0,
+                max_tokens=3000,
+            )
+            text = response.choices[0].message.content
+
+            # Sanitize model artifacts before logging/returning
+            text = clean_model_artifacts(text)
+
+            if not text:
+                raise ValueError("Empty response from OpenRouter")
+
+            task_store.update_task(
+                task_id,
+                status="completed",
+                details={"response_length": len(text), "provider": "openrouter"}
+            )
+            print("DEBUG RESULT:", text)
+            return {"result": text, "task_id": task_id}
+
+        except Exception as e:
+            print(f"OpenRouter failed: {str(e)}, falling back to Gemini")
+
+        # If OpenRouter failed, try Gemini as fallback
+        prompt = build_prompt(req)
+        client = get_gemini_client()
 
         # Retry logic with exponential backoff
         max_attempts = 3
@@ -408,7 +455,7 @@ async def analyze_resume(req: ResumeAnalysisRequest, request: Request):
                 task_store.update_task(
                     task_id,
                     status="completed",
-                    details={"response_length": len(text), "attempt": attempt}
+                    details={"response_length": len(text), "attempt": attempt, "provider": "gemini"}
                 )
                 print("DEBUG RESULT:", text)
                 return {"result": text, "task_id": task_id}
@@ -420,150 +467,11 @@ async def analyze_resume(req: ResumeAnalysisRequest, request: Request):
                     await asyncio.sleep(delay + jitter)
                     continue
                 task_store.update_task(task_id, status="error", details={"error": str(e)})
-                return {"error": f"Gemini request failed: {str(e)}"}
+                return {"error": f"Both OpenRouter and Gemini failed: {str(e)}"}
 
     except Exception as e:
         task_store.update_task(task_id, status="error", details={"error": str(e)})
-        return {"error": f"Gemini request failed: {str(e)}"}
-
-
-@router.post("/parse-and-analyze-resume")
-async def parse_and_analyze_resume_endpoint(req: ResumeAnalysisRequest, request: Request):
-    """
-    OPTIMIZED: Parse and analyze resume in a SINGLE Gemini call.
-    
-    Instead of making 2 separate API calls (one for parsing, one for analysis),
-    this endpoint combines both operations into 1 call, reducing API usage and cost.
-    
-    Returns a structured JSON with:
-    {
-        "parsed_data": {
-            "profile": {...},
-            "educations": [...],
-            "workExperiences": [...],
-            "skills": [...]
-        },
-        "analysis_results": {
-            "skills_analysis": {...},
-            "experience_analysis": {...},
-            "education_analysis": {...},
-            "key_strengths": [...],
-            "role_alignment": {...},  // if job_role provided
-            "job_match": {...},  // if job_description provided
-            "overall_assessment": {...}
-        },
-        "task_id": <id>
-    }
-    """
-    if not validate_resume_text(req.resume):
-        return {"error": "Text does not appear to be a resume"}
-    
-    client_ip = getattr(request.client, "host", "unknown")
-    allowed, retry_after = check_rate_limit(client_ip)
-    if not allowed:
-        retry = int(retry_after or 0)
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Rate limit exceeded. Try again in {retry}s.",
-            headers={"Retry-After": str(retry)})
-    
-    task_id = task_store.create_task(
-        task_type="parse_and_analyze_resume",
-        details={
-            "text_length": len(req.resume),
-            "has_job_role": bool(req.job_role),
-            "has_job_description": bool(req.job_description),
-            "client_ip": client_ip
-        }
-    )
-    
-    try:
-        task_store.update_task(task_id, status="processing")
-        
-        # Call combined parse+analyze function with retries
-        result = await call_gemini_with_retries_combined(
-            text=req.resume,
-            job_role=req.job_role, # type: ignore
-            job_description=req.job_description, # type: ignore
-            attempts=3,
-            base_delay=1.0,
-            max_delay=8.0
-        )
-        
-        if isinstance(result, dict) and "error" not in result:
-            task_store.update_task(
-                task_id,
-                status="completed",
-                details={
-                    "has_parsed_data": "parsed_data" in result,
-                    "has_analysis": "analysis_results" in result
-                }
-            )
-            return {**result, "task_id": task_id}
-        else:
-            task_store.update_task(task_id, status="error", details=result)
-            return {**result, "task_id": task_id}
-    
-    except Exception as e:
-        error_msg = str(e)
-        task_store.update_task(task_id, status="error", details={"error": error_msg})
-        return {"error": f"Parse and analyze failed: {error_msg}", "task_id": task_id}
-
-
-async def call_gemini_with_retries_combined(
-    text: str,
-    job_role: str = None, # type: ignore
-    job_description: str = None, #type: ignore
-    attempts: int = 3,
-    base_delay: float = 1.0,
-    max_delay: float = 8.0
-) -> dict:
-    """
-    Wrapper for gemini_parse_and_analyze_resume with retries and rate limiting.
-    """
-    async with GEMINI_SEMAPHORE:
-        last_exc = None
-        for attempt in range(1, attempts + 1):
-            # Global cooldown check
-            allowed, wait = check_gemini_rate_limit()
-            if not allowed:
-                await asyncio.sleep(wait)
-            
-            try:
-                # Run blocking gemini call off the event loop
-                result = await asyncio.to_thread(
-                    gemini_parse_and_analyze_resume,
-                    text,
-                    job_role,
-                    job_description
-                )
-                
-                # If result is dict and not containing "error", treat as success
-                if isinstance(result, dict) and "error" not in result:
-                    return result
-                
-                # If model returned an explicit error, check if it's rate limit (429) to retry
-                if isinstance(result, dict) and "error" in result and "429" in str(result.get("error", "")):
-                    last_exc = result
-                else:
-                    last_exc = result if isinstance(result, dict) else {"error": "Unknown response"}
-            
-            except Exception as e:
-                error_str = str(e)
-                if "429" in error_str:
-                    last_exc = {"error": error_str}
-                else:
-                    last_exc = {"error": error_str}
-            
-            # If not last attempt, backoff with jitter
-            if attempt < attempts:
-                delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
-                jitter = random.uniform(0, delay * 0.5)
-                await asyncio.sleep(delay + jitter)
-        
-        # Exhausted retries: return last error/result
-        return last_exc or {"error": "parse_and_analyze_failed_unknown"}
-
+        return {"error": f"Resume analysis failed: {str(e)}"}
         
 
     
