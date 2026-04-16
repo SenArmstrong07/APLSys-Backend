@@ -213,7 +213,7 @@ async def search_word_endpoint(request: SearchRequest, ocrreq: Request):
     return {"matches": matches}
 
 @router.post("/process-folder")
-async def process_folder(request: Request, files: List[UploadFile] = File(...), _: None = Depends(get_doctr_dependency)):
+async def process_folder(request: Request, files: List[UploadFile] = File(...)):
     """Process multiple documents with progress tracking using Cloud Vision first, then DocTR fallback."""
     batch_task_id = task_store.create_task(
         task_type="batch_folder_process",
@@ -268,50 +268,53 @@ async def process_folder(request: Request, files: List[UploadFile] = File(...), 
                 except Exception as e:
                     print(f"Cloud Vision failed for {file.filename}: {str(e)}, falling back to DocTR")
                     ocr_provider = "doctr"
-                    
-                    # Fallback to DocTR
-                    # Get Doctr predictor from request.state (created by dependency)
-                    predictor = getattr(request.state, "doctr_predictor", None)
-                    if predictor is None:
-                        raise HTTPException(status_code=500, detail="Doctr OCR predictor not available")
-                    
-                    # Use Doctr predictor via extract_on_document
-                    doc, exported = extract_on_document(content, predictor)
-                    
-                    # If doc is a PIL Image, run Doctr predictor on it
-                    temp_path = None
-                    if isinstance(doc, Image.Image):
-                        import importlib
-                        doctr_io = importlib.import_module("doctr.io")
-                        
-                        # Save PIL Image to temporary file
-                        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                            temp_path = tmp.name
-                            doc.save(temp_path)
-                        
-                        # Run Doctr predictor
-                        doc_file = doctr_io.DocumentFile.from_images([temp_path])
-                        result = await asyncio.to_thread(predictor, doc_file)
-                        exported = result.export()
-                    
-                    # Extract text from exported OCR result
-                    text = []
-                    for page in exported.get("pages", []):
-                        for block in page.get("blocks", []):
-                            if not isinstance(block, dict):
-                                continue
-                            for line in block.get("lines", []):
-                                words = line.get("words", []) or []
-                                line_text = " ".join([w.get("value", "") for w in words]).strip()
-                                if line_text:
-                                    text.append(line_text)
-                    
-                    plain_text = "\n".join(text)
-                    
-                    # Clean up temp file
-                    if "temp_path" in locals() and temp_path and Path(temp_path).exists():
+
+                    # Fallback to DocTR - create predictor on-demand
+                    predictor = create_doctr_ocr()
+                    try:
+                        # Use Doctr predictor via extract_on_document
+                        doc, exported = extract_on_document(content, predictor)
+
+                        # If doc is a PIL Image, run Doctr predictor on it
+                        temp_path = None
+                        if isinstance(doc, Image.Image):
+                            import importlib
+                            doctr_io = importlib.import_module("doctr.io")
+
+                            # Save PIL Image to temporary file
+                            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                                temp_path = tmp.name
+                                doc.save(temp_path)
+
+                            # Run Doctr predictor
+                            doc_file = doctr_io.DocumentFile.from_images([temp_path])
+                            result = await asyncio.to_thread(predictor, doc_file)
+                            exported = result.export()
+
+                        # Extract text from exported OCR result
+                        text = []
+                        for page in exported.get("pages", []):
+                            for block in page.get("blocks", []):
+                                if not isinstance(block, dict):
+                                    continue
+                                for line in block.get("lines", []):
+                                    words = line.get("words", []) or []
+                                    line_text = " ".join([w.get("value", "") for w in words]).strip()
+                                    if line_text:
+                                        text.append(line_text)
+
+                        plain_text = "\n".join(text)
+
+                        # Clean up temp file
+                        if "temp_path" in locals() and temp_path and Path(temp_path).exists():
+                            try:
+                                Path(temp_path).unlink()
+                            except Exception:
+                                pass
+                    finally:
+                        # Always dispose of the predictor after use
                         try:
-                            Path(temp_path).unlink()
+                            dispose_doctr_ocr(predictor)
                         except Exception:
                             pass
                 
