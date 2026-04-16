@@ -1137,7 +1137,7 @@ async def vision_health():
         }
     """
     import os
-    api_key = os.getenv("OCR-KEY")
+    api_key = os.getenv("OCR_KEY")
     if api_key:
         return {
             "status": "healthy",
@@ -1148,5 +1148,5 @@ async def vision_health():
         return {
             "status": "error",
             "credentials_configured": False,
-            "message": "OCR-KEY environment variable not set"
+            "message": "OCR_KEY environment variable not set"
         }

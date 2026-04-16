@@ -65,7 +65,7 @@ def get_vision_client() -> ImageAnnotatorClient:
     except Exception as e:
         raise RuntimeError(f"Failed to initialize Google Cloud Vision client: {str(e)}")
 
-VISION_API_KEY = os.getenv("OCR-KEY")
+VISION_API_KEY = os.getenv("OCR_KEY")
 
 def google_cloud_vision_ocr(image_bytes: bytes) -> Dict[str, Any]:
     """
@@ -87,7 +87,7 @@ def google_cloud_vision_ocr(image_bytes: bytes) -> Dict[str, Any]:
         }
     """
     if not VISION_API_KEY:
-        raise RuntimeError("OCR-KEY environment variable not set")
+        raise RuntimeError("OCR_KEY environment variable not set")
     
     try:
         # Encode image to base64
