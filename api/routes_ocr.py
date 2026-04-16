@@ -20,8 +20,7 @@ from services.ocr_service import (
     intersects,
     run_ocr_in_subprocess,
     classify_document_type,
-    google_cloud_vision_ocr,
-    get_vision_client
+    google_cloud_vision_ocr
 )
 from utils.task_store import TaskStore
 from utils.ocr_rate_limiter import ocr_limiter
@@ -1128,7 +1127,7 @@ async def google_cloud_vision_ocr_endpoint(
 async def vision_health():
     """
     Health check endpoint for Google Cloud Vision API.
-    Tests if credentials are properly configured and accessible.
+    Tests if API key is properly configured.
     
     Returns:
         {
@@ -1137,16 +1136,17 @@ async def vision_health():
             "message": str
         }
     """
-    try:
-        client = get_vision_client()
+    import os
+    api_key = os.getenv("OCR-KEY")
+    if api_key:
         return {
             "status": "healthy",
             "credentials_configured": True,
-            "message": "Google Cloud Vision API is properly configured and accessible"
+            "message": "Google Cloud Vision API key is configured"
         }
-    except Exception as e:
+    else:
         return {
             "status": "error",
             "credentials_configured": False,
-            "message": f"Google Cloud Vision API error: {str(e)}"
+            "message": "OCR-KEY environment variable not set"
         }

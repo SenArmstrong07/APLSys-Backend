@@ -65,9 +65,11 @@ def get_vision_client() -> ImageAnnotatorClient:
     except Exception as e:
         raise RuntimeError(f"Failed to initialize Google Cloud Vision client: {str(e)}")
 
+VISION_API_KEY = os.getenv("OCR-KEY")
+
 def google_cloud_vision_ocr(image_bytes: bytes) -> Dict[str, Any]:
     """
-    Perform OCR using Google Cloud Vision API.
+    Perform OCR using Google Cloud Vision API via REST with API key.
     This function extracts text from images using Google's powerful OCR service.
     
     Args:
@@ -84,89 +86,126 @@ def google_cloud_vision_ocr(image_bytes: bytes) -> Dict[str, Any]:
             }]
         }
     """
+    if not VISION_API_KEY:
+        raise RuntimeError("OCR-KEY environment variable not set")
+    
     try:
-        client = get_vision_client()
+        # Encode image to base64
+        image_b64 = base64.b64encode(image_bytes).decode('utf-8')
         
-        # Create image object
-        image = vision.Image(content=image_bytes)
+        # Vision API request payload
+        payload = {
+            "requests": [{
+                "image": {"content": image_b64},
+                "features": [{"type": "DOCUMENT_TEXT_DETECTION"}]
+            }]
+        }
         
-        # Perform text detection (OCR)
-        response = client.document_text_detection(image=image) # type: ignore
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": VISION_API_KEY
+        }
         
-        if response.error.message:
-            raise RuntimeError(f"Google Cloud Vision API error: {response.error.message}")
+        url = "https://vision.googleapis.com/v1/images:annotate"
+        response = requests.post(url, json=payload, headers=headers, timeout=30)
+        response.raise_for_status()
+        
+        data = response.json()
+        
+        if "error" in data:
+            raise RuntimeError(f"Google Cloud Vision API error: {data['error']}")
         
         # Extract structured data from response
         pages = []
         
-        if response.full_text_annotation:
-            full_text = response.full_text_annotation.text
+        if "responses" in data and data["responses"]:
+            vision_response = data["responses"][0]
             
-            # Parse pages
-            for page_num, page in enumerate(response.full_text_annotation.pages):
-                page_data = {
-                    "page_number": page_num + 1,
-                    "text": "",
+            if "error" in vision_response:
+                raise RuntimeError(f"Vision API response error: {vision_response['error']}")
+            
+            if "fullTextAnnotation" in vision_response:
+                full_text = vision_response["fullTextAnnotation"]["text"]
+                
+                # Parse pages
+                for page_num, page in enumerate(vision_response["fullTextAnnotation"].get("pages", [])):
+                    page_data = {
+                        "page_number": page_num + 1,
+                        "text": "",
+                        "blocks": [],
+                        "confidence": 0,
+                        "raw_response": None
+                    }
+                    
+                    # Process blocks (paragraphs)
+                    block_list = []
+                    all_confidences = []
+                    
+                    for block in page.get("blocks", []):
+                        block_data = {"lines": []}
+                        
+                        # Process paragraphs/lines
+                        for paragraph in block.get("paragraphs", []):
+                            line_words = []
+                            
+                            # Process words
+                            for word in paragraph.get("words", []):
+                                word_text = ''.join([symbol["text"] for symbol in word.get("symbols", [])])
+                                confidence = word.get("confidence", 0)
+                                
+                                # Extract bounding box
+                                if "boundingBox" in word and "vertices" in word["boundingBox"]:
+                                    vertices = word["boundingBox"]["vertices"]
+                                    # Normalize vertices to [0-1] range relative to image
+                                    geometry = [[v.get("x", 0), v.get("y", 0)] for v in vertices[:2]]  # top-left and bottom-right
+                                else:
+                                    geometry = []
+                                
+                                line_words.append({
+                                    "value": word_text,
+                                    "confidence": confidence,
+                                    "geometry": geometry
+                                })
+                                
+                                if confidence > 0:
+                                    all_confidences.append(confidence)
+                            
+                            if line_words:
+                                block_data["lines"].append({"words": line_words})
+                        
+                        if block_data["lines"]:
+                            block_list.append(block_data)
+                    
+                    page_data["blocks"] = block_list
+                    page_data["text"] = full_text
+                    
+                    # Calculate average confidence for the page
+                    if all_confidences:
+                        page_data["confidence"] = sum(all_confidences) / len(all_confidences)
+                    
+                    pages.append(page_data)
+            
+            else:
+                # Fallback if no fullTextAnnotation
+                text = vision_response.get("textAnnotations", [{}])[0].get("description", "")
+                pages.append({
+                    "page_number": 1,
+                    "text": text,
                     "blocks": [],
                     "confidence": 0,
-                    "raw_response": None
-                }
-                
-                # Process blocks (paragraphs)
-                block_list = []
-                all_confidences = []
-                
-                for block in page.blocks:
-                    block_data = {"lines": []}
-                    
-                    # Process paragraphs/lines
-                    for paragraph in block.paragraphs:
-                        line_words = []
-                        
-                        # Process words
-                        for word in paragraph.words:
-                            word_text = ''.join([symbol.text for symbol in word.symbols])
-                            confidence = word.confidence if hasattr(word, 'confidence') else 0
-                            
-                            # Extract bounding box
-                            if word.bounding_box and word.bounding_box.vertices:
-                                vertices = word.bounding_box.vertices
-                                # Normalize vertices to [0-1] range relative to image
-                                geometry = [[v.x, v.y] for v in vertices[:2]]  # top-left and bottom-right
-                            else:
-                                geometry = []
-                            
-                            line_words.append({
-                                "value": word_text,
-                                "confidence": confidence,
-                                "geometry": geometry
-                            })
-                            
-                            if confidence > 0:
-                                all_confidences.append(confidence)
-                        
-                        if line_words:
-                            block_data["lines"].append({"words": line_words})
-                    
-                    if block_data["lines"]:
-                        block_list.append(block_data)
-                
-                page_data["blocks"] = block_list
-                page_data["text"] = full_text
-                
-                # Calculate average confidence for the page
-                if all_confidences:
-                    page_data["confidence"] = sum(all_confidences) / len(all_confidences)
-                
-                pages.append(page_data)
+                    "raw_response": vision_response
+                })
+                full_text = text
         
         return {
             "pages": pages if pages else [{"text": "", "blocks": [], "confidence": 0}],
-            "full_text": response.full_text_annotation.text if response.full_text_annotation else ""
+            "full_text": full_text if 'full_text' in locals() else ""
         }
         
+    except requests.RequestException as e:
+        raise RuntimeError(f"Failed to call Google Cloud Vision API: {str(e)}")
     except Exception as e:
-        raise RuntimeError(f"Google Cloud Vision OCR failed: {str(e)}")
+        raise RuntimeError(f"Error processing Vision API response: {str(e)}")
 
 # Keep track of processing status
 processing_status: OrderedDict = OrderedDict()

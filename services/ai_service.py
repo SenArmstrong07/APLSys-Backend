@@ -30,8 +30,12 @@ def get_gcp_access_token(scopes=None) -> str:
 def get_gemini_headers() -> dict:
     """Build Gemini request headers using API key if provided, otherwise ADC bearer token."""
     headers = {"Content-Type": "application/json"}
-    token = get_gcp_access_token()
-    headers["Authorization"] = f"Bearer {token}"
+    api_key = os.getenv("GEMINI_API_KEY")
+    if api_key:
+        headers["x-goog-api-key"] = api_key
+    else:
+        token = get_gcp_access_token()
+        headers["Authorization"] = f"Bearer {token}"
     return headers
 
 
