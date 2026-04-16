@@ -20,16 +20,16 @@ from services.ai_service import (
     deepseek_extract_metadata_from_text,
     gemini_extract_resume_profile,
     get_gemini_client,
-    get_gemini_headers,
     validate_resume_text
 )
+from api.routes_debug import get_gemini_headers
 from utils.task_store import TaskStore
 from utils.openrouter_client import client, OPENROUTER_API_KEY, OPENROUTER_MODEL
 router = APIRouter()
 task_store = TaskStore()
 load_dotenv()
 
-GEMINI_MODEL = "gemini-1.5-flash"
+GEMINI_MODEL = "gemini-2.5-flash"
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
 GEMINI_RATE_LIMIT_LOCK = threading.Lock()
@@ -317,7 +317,7 @@ async def batch_analyze_resumes(
 
             # Call Gemini API (reuse your analyze logic)
             url = f"{BASE_URL}/models/{GEMINI_MODEL}:generateContent"
-            headers = get_gemini_headers()
+            headers = get_gemini_headers(use_api_key=True)
             payload = {
                 "contents": [
                     {
@@ -484,7 +484,7 @@ async def classify_text(req: ClassifyRequest):
     )
 
     url = f"{BASE_URL}/models/{GEMINI_MODEL}:generateContent"
-    headers = get_gemini_headers()
+    headers = get_gemini_headers(use_api_key=True)
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
 
     try:
@@ -507,7 +507,7 @@ async def classify_text(req: ClassifyRequest):
 def detect_table_layout(image_path):
     image_b64 = image_to_base64(image_path)
     url = f"{BASE_URL}/models/{GEMINI_MODEL}:generateContent"
-    headers = get_gemini_headers()
+    headers = get_gemini_headers(use_api_key=True)
     prompt = (
         "Analyze the following image and describe the table layout. "
         "List the number of tables, their positions (bounding boxes), and the number of rows and columns for each table. "

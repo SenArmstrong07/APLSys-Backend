@@ -7,6 +7,7 @@ from google.auth import default
 from google.auth.transport.requests import Request
 from utils.img_to_b64 import image_to_base64
 from utils.openrouter_client import client, OPENROUTER_MODEL, OPENROUTER_API_KEY
+from api.routes_debug import get_gemini_headers
 import time
 import re
 
@@ -14,7 +15,7 @@ import re
 load_dotenv()
 
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
-GEMINI_MODEL = "gemini-1.5-flash"
+GEMINI_MODEL = "gemini-2.5-flash"
 GEMINI_AUTH_SCOPE = os.getenv("GEMINI_AUTH_SCOPE", "https://www.googleapis.com/auth/cloud-platform")
 
 
@@ -26,17 +27,6 @@ def get_gcp_access_token(scopes=None) -> str:
         credentials.refresh(Request())
     return credentials.token
 
-
-def get_gemini_headers() -> dict:
-    """Build Gemini request headers using API key if provided, otherwise ADC bearer token."""
-    headers = {"Content-Type": "application/json"}
-    api_key = os.getenv("GEMINI_API_KEY")
-    if api_key:
-        headers["x-goog-api-key"] = api_key
-    else:
-        token = get_gcp_access_token()
-        headers["Authorization"] = f"Bearer {token}"
-    return headers
 
 
 def get_gemini_client():
@@ -67,7 +57,7 @@ def gemini_extract_resume_profile(full_text: str, model_name=GEMINI_MODEL) -> di
     load_dotenv()
     model = model_name or os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     url = f"{BASE_URL}/models/{model}:generateContent"
-    headers = get_gemini_headers()
+    headers = get_gemini_headers(use_api_key=True)
 
     # Minimalization strategy:
     # - keep top-of-resume header (first 8 non-empty lines)
@@ -253,7 +243,7 @@ def gemini_classify_document(text: str, attempts: int = 3, base_delay: float = 1
         return {"error": "No text provided"}
 
     url = f"{BASE_URL}/models/{GEMINI_MODEL}:generateContent"
-    headers = get_gemini_headers()
+    headers = get_gemini_headers(use_api_key=True)
 
     prompt = (
         "Classify the type of the following document. "
