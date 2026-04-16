@@ -118,9 +118,13 @@ For each '##' section provide NO MORE THAN 2 sentences. Keep lists short (max 3 
 ## Skills Analysis
 - Skill Proficiency: In 1-2 sentences, summarize the candidate's apparent skill levels.
 - Missing Skills: In 1-2 sentences, list the most critical missing skills (max 3 short phrases).
+- End the section with a single-line score like: "Score: XX/100".
 
 ## Experience Analysis
 In up to 2 sentences, evaluate how experience is presented (use of action verbs, metrics, relevance). End the section with a single-line score like: "Score: XX/100".
+
+## Education Analysis
+In 1-2 sentences, analyze the CV's education background (degrees, institutions, relevance). End the section with a single-line score like: "Score: XX/100".
 
 ## Key Strengths
 List up to 3 concise strengths (each 1 short phrase or sentence).
@@ -281,7 +285,7 @@ async def gemini_extract_resume_profile_endpoint(req: ResumeTextRequest, request
     except Exception as e:
         task_store.update_task(task_id, status="error", details={"error": str(e)})
         raise
-
+# unused
 @router.post("/batch-analyze-resumes") # endpoint is for batch analyzing multiple cvs at once but unused.
 async def batch_analyze_resumes(
     files: List[UploadFile] = File(...),
