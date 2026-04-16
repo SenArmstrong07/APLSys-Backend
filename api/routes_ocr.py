@@ -214,7 +214,7 @@ async def search_word_endpoint(request: SearchRequest, ocrreq: Request):
 
 @router.post("/process-folder")
 async def process_folder(request: Request, files: List[UploadFile] = File(...), _: None = Depends(get_doctr_dependency)):
-    """Process multiple documents with progress tracking using Doctr."""
+    """Process multiple documents with progress tracking using Cloud Vision first, then DocTR fallback."""
     batch_task_id = task_store.create_task(
         task_type="batch_folder_process",
         details={"file_count": len(files)}
@@ -222,10 +222,6 @@ async def process_folder(request: Request, files: List[UploadFile] = File(...), 
     
     try:
         task_store.update_task(batch_task_id, status="processing")
-        # Get Doctr predictor from request.state (created by dependency)
-        predictor = getattr(request.state, "doctr_predictor", None)
-        if predictor is None:
-            raise HTTPException(status_code=500, detail="Doctr OCR predictor not available")
         
         processed_results = []
         for idx, file in enumerate(files, 1):
@@ -239,49 +235,97 @@ async def process_folder(request: Request, files: List[UploadFile] = File(...), 
                 task_store.update_task(file_task_id, status="processing")
                 content = await file.read()
                 
-                # Use Doctr predictor via extract_on_document
-                doc, exported = extract_on_document(content, predictor)
+                # Try Cloud Vision first
+                ocr_provider = "cloud_vision"
+                plain_text = ""
                 
-                # If doc is a PIL Image, run Doctr predictor on it
-                temp_path = None
-                if isinstance(doc, Image.Image):
-                    import importlib
-                    doctr_io = importlib.import_module("doctr.io")
+                try:
+                    # Convert content to image bytes for Cloud Vision
+                    if content.startswith(b'%PDF'):
+                        # PDF - convert first page to image
+                        pages_images = pdf_to_images_bytes(content, dpi=300)
+                        if pages_images:
+                            image_bytes = pages_images[0]
+                        else:
+                            raise ValueError("Could not convert PDF to image")
+                    else:
+                        # Assume it's an image
+                        image_bytes = content
                     
-                    # Save PIL Image to temporary file
-                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                        temp_path = tmp.name
-                        doc.save(temp_path)
+                    # Call Cloud Vision OCR
+                    vision_result = await asyncio.to_thread(google_cloud_vision_ocr, image_bytes)
                     
-                    # Run Doctr predictor
-                    doc_file = doctr_io.DocumentFile.from_images([temp_path])
-                    result = await asyncio.to_thread(predictor, doc_file)
-                    exported = result.export()
-                
-                # Extract text from exported OCR result
-                text = []
-                for page in exported.get("pages", []):
-                    for block in page.get("blocks", []):
-                        if not isinstance(block, dict):
-                            continue
-                        for line in block.get("lines", []):
-                            words = line.get("words", []) or []
-                            line_text = " ".join([w.get("value", "") for w in words]).strip()
-                            if line_text:
-                                text.append(line_text)
-                
-                plain_text = "\n".join(text)
+                    # Extract text from Cloud Vision result
+                    text_parts = []
+                    for page in vision_result.get("pages", []):
+                        if isinstance(page, dict) and "text" in page:
+                            text_parts.append(page["text"])
+                    plain_text = "\n".join(text_parts)
+                    
+                    if not plain_text.strip():
+                        raise ValueError("Cloud Vision returned empty text")
+                        
+                except Exception as e:
+                    print(f"Cloud Vision failed for {file.filename}: {str(e)}, falling back to DocTR")
+                    ocr_provider = "doctr"
+                    
+                    # Fallback to DocTR
+                    # Get Doctr predictor from request.state (created by dependency)
+                    predictor = getattr(request.state, "doctr_predictor", None)
+                    if predictor is None:
+                        raise HTTPException(status_code=500, detail="Doctr OCR predictor not available")
+                    
+                    # Use Doctr predictor via extract_on_document
+                    doc, exported = extract_on_document(content, predictor)
+                    
+                    # If doc is a PIL Image, run Doctr predictor on it
+                    temp_path = None
+                    if isinstance(doc, Image.Image):
+                        import importlib
+                        doctr_io = importlib.import_module("doctr.io")
+                        
+                        # Save PIL Image to temporary file
+                        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                            temp_path = tmp.name
+                            doc.save(temp_path)
+                        
+                        # Run Doctr predictor
+                        doc_file = doctr_io.DocumentFile.from_images([temp_path])
+                        result = await asyncio.to_thread(predictor, doc_file)
+                        exported = result.export()
+                    
+                    # Extract text from exported OCR result
+                    text = []
+                    for page in exported.get("pages", []):
+                        for block in page.get("blocks", []):
+                            if not isinstance(block, dict):
+                                continue
+                            for line in block.get("lines", []):
+                                words = line.get("words", []) or []
+                                line_text = " ".join([w.get("value", "") for w in words]).strip()
+                                if line_text:
+                                    text.append(line_text)
+                    
+                    plain_text = "\n".join(text)
+                    
+                    # Clean up temp file
+                    if "temp_path" in locals() and temp_path and Path(temp_path).exists():
+                        try:
+                            Path(temp_path).unlink()
+                        except Exception:
+                            pass
                 
                 task_store.update_task(
                     file_task_id,
                     status="completed",
                     progress=1.0,
-                    details={"text_length": len(plain_text)}
+                    details={"text_length": len(plain_text), "ocr_provider": ocr_provider}
                 )
                 processed_results.append({
                     "filename": file.filename,
                     "status": "success",
-                    "text": plain_text
+                    "text": plain_text,
+                    "ocr_provider": ocr_provider
                 })
                 
             except Exception as e:
