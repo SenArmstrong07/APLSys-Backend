@@ -19,6 +19,7 @@ from model.request_schema import ResumeTextRequest, TextRequest
 from services.ai_service import (
     deepseek_extract_metadata_from_text,
     gemini_extract_resume_profile,
+    gemini_parse_and_analyze_resume,
     get_gemini_client,
     validate_resume_text
 )
@@ -35,6 +36,7 @@ BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 GEMINI_RATE_LIMIT_LOCK = threading.Lock()
 GEMINI_LAST_CALL_TIME = 0.0
 GEMINI_MIN_INTERVAL = 3.0  # minimum seconds between Gemini calls (tweakable)
+GEMINI_SEMAPHORE = asyncio.Semaphore(1)  # Limit to 1 concurrent Gemini request
 
 
 #- **Current Skills**: [List ALL skills the candidate demonstrates in their resume, categorized by type (technical, soft, domain-specific, etc.). Be comprehensive.]
@@ -423,6 +425,145 @@ async def analyze_resume(req: ResumeAnalysisRequest, request: Request):
     except Exception as e:
         task_store.update_task(task_id, status="error", details={"error": str(e)})
         return {"error": f"Gemini request failed: {str(e)}"}
+
+
+@router.post("/parse-and-analyze-resume")
+async def parse_and_analyze_resume_endpoint(req: ResumeAnalysisRequest, request: Request):
+    """
+    OPTIMIZED: Parse and analyze resume in a SINGLE Gemini call.
+    
+    Instead of making 2 separate API calls (one for parsing, one for analysis),
+    this endpoint combines both operations into 1 call, reducing API usage and cost.
+    
+    Returns a structured JSON with:
+    {
+        "parsed_data": {
+            "profile": {...},
+            "educations": [...],
+            "workExperiences": [...],
+            "skills": [...]
+        },
+        "analysis_results": {
+            "skills_analysis": {...},
+            "experience_analysis": {...},
+            "education_analysis": {...},
+            "key_strengths": [...],
+            "role_alignment": {...},  // if job_role provided
+            "job_match": {...},  // if job_description provided
+            "overall_assessment": {...}
+        },
+        "task_id": <id>
+    }
+    """
+    if not validate_resume_text(req.resume):
+        return {"error": "Text does not appear to be a resume"}
+    
+    client_ip = getattr(request.client, "host", "unknown")
+    allowed, retry_after = check_rate_limit(client_ip)
+    if not allowed:
+        retry = int(retry_after or 0)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Rate limit exceeded. Try again in {retry}s.",
+            headers={"Retry-After": str(retry)})
+    
+    task_id = task_store.create_task(
+        task_type="parse_and_analyze_resume",
+        details={
+            "text_length": len(req.resume),
+            "has_job_role": bool(req.job_role),
+            "has_job_description": bool(req.job_description),
+            "client_ip": client_ip
+        }
+    )
+    
+    try:
+        task_store.update_task(task_id, status="processing")
+        
+        # Call combined parse+analyze function with retries
+        result = await call_gemini_with_retries_combined(
+            text=req.resume,
+            job_role=req.job_role, # type: ignore
+            job_description=req.job_description, # type: ignore
+            attempts=3,
+            base_delay=1.0,
+            max_delay=8.0
+        )
+        
+        if isinstance(result, dict) and "error" not in result:
+            task_store.update_task(
+                task_id,
+                status="completed",
+                details={
+                    "has_parsed_data": "parsed_data" in result,
+                    "has_analysis": "analysis_results" in result
+                }
+            )
+            return {**result, "task_id": task_id}
+        else:
+            task_store.update_task(task_id, status="error", details=result)
+            return {**result, "task_id": task_id}
+    
+    except Exception as e:
+        error_msg = str(e)
+        task_store.update_task(task_id, status="error", details={"error": error_msg})
+        return {"error": f"Parse and analyze failed: {error_msg}", "task_id": task_id}
+
+
+async def call_gemini_with_retries_combined(
+    text: str,
+    job_role: str = None, # type: ignore
+    job_description: str = None, #type: ignore
+    attempts: int = 3,
+    base_delay: float = 1.0,
+    max_delay: float = 8.0
+) -> dict:
+    """
+    Wrapper for gemini_parse_and_analyze_resume with retries and rate limiting.
+    """
+    async with GEMINI_SEMAPHORE:
+        last_exc = None
+        for attempt in range(1, attempts + 1):
+            # Global cooldown check
+            allowed, wait = check_gemini_rate_limit()
+            if not allowed:
+                await asyncio.sleep(wait)
+            
+            try:
+                # Run blocking gemini call off the event loop
+                result = await asyncio.to_thread(
+                    gemini_parse_and_analyze_resume,
+                    text,
+                    job_role,
+                    job_description
+                )
+                
+                # If result is dict and not containing "error", treat as success
+                if isinstance(result, dict) and "error" not in result:
+                    return result
+                
+                # If model returned an explicit error, check if it's rate limit (429) to retry
+                if isinstance(result, dict) and "error" in result and "429" in str(result.get("error", "")):
+                    last_exc = result
+                else:
+                    last_exc = result if isinstance(result, dict) else {"error": "Unknown response"}
+            
+            except Exception as e:
+                error_str = str(e)
+                if "429" in error_str:
+                    last_exc = {"error": error_str}
+                else:
+                    last_exc = {"error": error_str}
+            
+            # If not last attempt, backoff with jitter
+            if attempt < attempts:
+                delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
+                jitter = random.uniform(0, delay * 0.5)
+                await asyncio.sleep(delay + jitter)
+        
+        # Exhausted retries: return last error/result
+        return last_exc or {"error": "parse_and_analyze_failed_unknown"}
+
         
 
     
