@@ -30,7 +30,7 @@ task_store = TaskStore()
 load_dotenv()
 
 GEMINI_MODEL = "gemini-2.5-flash"
-BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+BASE_URL = "https://generativelanguage.googleapis.com/v1"
 
 GEMINI_RATE_LIMIT_LOCK = threading.Lock()
 GEMINI_LAST_CALL_TIME = 0.0
