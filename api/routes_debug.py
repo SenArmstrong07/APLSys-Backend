@@ -15,7 +15,7 @@ from google.auth.transport.requests import Request
 router = APIRouter()
 load_dotenv()
 
-BASE_URL = "https://generativelanguage.googleapis.com/v1"
+BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
 
 def get_gcp_credentials():
@@ -25,10 +25,17 @@ def get_gcp_credentials():
     return credentials
 
 
-def get_gemini_headers():
+def get_gemini_headers(use_api_key=False):
     headers = {"Content-Type": "application/json"}
-    token = get_gcp_credentials().token
-    headers["Authorization"] = f"Bearer {token}"
+    if use_api_key:
+        api_key = getenv("GEMINI_API_KEY")
+        if api_key:
+            headers["x-goog-api-key"] = api_key
+        else:
+            raise ValueError("GEMINI_API_KEY not set")
+    else:
+        token = get_gcp_credentials().token
+        headers["Authorization"] = f"Bearer {token}"
     return headers
 
 
@@ -58,7 +65,7 @@ async def test_gemini_key():
 @router.get("/list-models")
 async def list_models():
     url = f"{BASE_URL}/models"
-    headers = get_gemini_headers()
+    headers = get_gemini_headers(use_api_key=True)
     try:
         response = requests.get(url, headers=headers)
         response.raise_for_status()
